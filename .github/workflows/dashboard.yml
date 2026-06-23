@@ -1,4 +1,4 @@
-name: Dashboard ZAS — Actualización diaria
+name: Dashboard ZAS
 
 on:
   schedule:
@@ -12,26 +12,29 @@ jobs:
   generar:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Dependencias
-        run: pip install requests
+      - run: pip install requests
 
       - name: Generar dashboard
         env:
           ODOO_PASS: ${{ secrets.ODOO_PASS }}
         run: python generar_dashboard.py
 
-      - name: Publicar
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
-          publish_branch: gh-pages
-          commit_message: "update"
+      - name: Deploy a gh-pages
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          cp dashboard_talentos.html /tmp/dashboard_talentos.html
+          git checkout --orphan gh-pages-new
+          git rm -rf . --quiet
+          cp /tmp/dashboard_talentos.html ./dashboard_talentos.html
+          git add dashboard_talentos.html
+          git commit -m "Dashboard actualizado"
+          git push origin gh-pages-new:gh-pages --force
