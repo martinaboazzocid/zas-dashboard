@@ -319,18 +319,27 @@ def bajar_datos():
 # ══════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════
+def _normalizar_nombre(nombre):
+    """Normaliza el nombre a Title Case para evitar duplicados por mayusculas."""
+    if not nombre:
+        return "Sin nombre"
+    return nombre.strip().title()
+
+
 def _extract_talent_from_product(prod_name):
     if not prod_name:
         return "Sin nombre"
     idx = prod_name.find("(")
-    return prod_name[:idx].strip() if idx > 0 else prod_name.strip()
+    raw = prod_name[:idx].strip() if idx > 0 else prod_name.strip()
+    return _normalizar_nombre(raw)
 
 
 def _extract_talent_from_task(task_name):
     if not task_name:
         return "Sin nombre"
     idx = task_name.find("(")
-    return task_name[:idx].strip() if idx > 0 else task_name.strip()
+    raw = task_name[:idx].strip() if idx > 0 else task_name.strip()
+    return _normalizar_nombre(raw)
 
 
 def pais_final(so):
