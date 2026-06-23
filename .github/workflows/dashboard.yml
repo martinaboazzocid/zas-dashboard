@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
     # Permite correrlo manualmente desde GitHub con un click
 
+permissions:
+  contents: write
+
 jobs:
   generar:
     runs-on: ubuntu-latest
@@ -34,5 +37,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .
           publish_branch: gh-pages
-          include_files: dashboard_talentos.html
           commit_message: "Dashboard actualizado ${{ github.run_number }}"
