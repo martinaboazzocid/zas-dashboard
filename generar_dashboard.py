@@ -1,0 +1,967 @@
+#!/usr/bin/env python3
+"""
+Dashboard Talentos ZAS — Generador
+====================================
+Descarga datos de Odoo via JSON-RPC y genera un HTML auto-contenido.
+
+Uso:
+    python generar_dashboard.py
+
+Salida:
+    dashboard_talentos.html  (en esta misma carpeta)
+"""
+
+import os
+import requests
+from datetime import datetime
+from collections import defaultdict
+
+# ══════════════════════════════════════════════════════════════
+# CONFIGURACIÓN
+# ══════════════════════════════════════════════════════════════
+ODOO_URL  = "https://zas-talent.odoo.com"
+ODOO_DB   = "zas-talent"
+ODOO_USER = "martina.boazzo@zastalents.com"
+ODOO_PASS = os.environ.get("ODOO_PASS", "Fran4732")  # en GitHub Actions viene del secret
+
+OUTPUT_FILE = "dashboard_talentos.html"
+
+MEXICO_ID       = 3
+ALL_COMPANY_IDS = [1, 2, 3, 4, 5, 6]
+BATCH           = 500
+
+# ══════════════════════════════════════════════════════════════
+# MAPA DE TRADUCCIÓN: valor interno Odoo → etiqueta visible
+# Los campos x_studio_campaas y x_studio_campaas_1 son selection
+# fields. Odoo devuelve la clave interna, no la etiqueta.
+# Ejemplo: 'Campañas' → 'Campañas Argentinas'
+# ══════════════════════════════════════════════════════════════
+PAIS_LABELS = {
+    # Argentina
+    "Campañas":                  "Campañas Argentinas",
+    "Campañas Argentinas":       "Campañas Argentinas",
+    "campanas_argentinas":       "Campañas Argentinas",
+    "arg":                       "Campañas Argentinas",
+    # Chile
+    "Campañas Chile":            "Campañas Chile",
+    "Campañas Chilenas":         "Campañas Chile",
+    "campanas_chile":            "Campañas Chile",
+    "chi":                       "Campañas Chile",
+    # Colombia
+    "Campañas Colombia":         "Campañas Colombia",
+    "Campañas Colombianas":      "Campañas Colombia",
+    "campanas_colombia":         "Campañas Colombia",
+    "col":                       "Campañas Colombia",
+    # USA
+    "US Campaigns":              "US Campaigns",
+    "Campañas USA":              "US Campaigns",
+    "usa":                       "US Campaigns",
+    "us_campaigns":              "US Campaigns",
+    # Perú
+    "Campañas Perú":             "Campañas Perú",
+    "Campañas Peru":             "Campañas Perú",
+    "campanas_peru":             "Campañas Perú",
+    "per":                       "Campañas Perú",
+    # Internacional
+    "Campañas Internacionales":  "Campañas Internacionales",
+    "campanas_internacionales":  "Campañas Internacionales",
+    "int":                       "Campañas Internacionales",
+}
+
+
+def traducir_pais(val):
+    """Traduce la clave interna de Odoo a la etiqueta visible."""
+    if not val or val is False:
+        return ""
+    if isinstance(val, (list, tuple)):
+        # many2one inesperado → tomar el nombre
+        val = val[1] if len(val) > 1 else str(val[0])
+    val = str(val).strip()
+    # Buscar en el mapa (exacto primero, luego case-insensitive)
+    if val in PAIS_LABELS:
+        return PAIS_LABELS[val]
+    val_lower = val.lower()
+    for k, v in PAIS_LABELS.items():
+        if k.lower() == val_lower:
+            return v
+    # Si no está en el mapa, devolver el valor tal cual (visible al menos)
+    return val
+
+
+# ══════════════════════════════════════════════════════════════
+# CONEXIÓN
+# ══════════════════════════════════════════════════════════════
+def login(session):
+    print("  Autenticando...")
+    resp = session.post(f"{ODOO_URL}/web/session/authenticate", json={
+        "jsonrpc": "2.0", "method": "call", "id": 1,
+        "params": {"db": ODOO_DB, "login": ODOO_USER, "password": ODOO_PASS}
+    }, timeout=30)
+    resp.raise_for_status()
+    result = resp.json().get("result", {})
+    uid = result.get("uid")
+    if not uid:
+        raise RuntimeError(f"Login fallido — revisá usuario/password. Detalle: {result.get('error', result)}")
+    print(f"  ✓ Login OK  (user_id={uid})")
+    return uid
+
+
+def activar_multicompany(session, uid):
+    session.post(f"{ODOO_URL}/web/dataset/call_kw", json={
+        "jsonrpc": "2.0", "method": "call", "id": 2,
+        "params": {
+            "model": "res.users", "method": "write",
+            "args": [[uid], {"company_id": 1, "company_ids": [[6, False, ALL_COMPANY_IDS]]}],
+            "kwargs": {"context": {"allowed_company_ids": ALL_COMPANY_IDS}}
+        }
+    }, timeout=30)
+    print(f"  ✓ Multi-company activado: {ALL_COMPANY_IDS}")
+
+
+def fetch_all(session, model, domain, fields, label=""):
+    records, offset = [], 0
+    while True:
+        resp = session.post(f"{ODOO_URL}/web/dataset/call_kw", json={
+            "jsonrpc": "2.0", "method": "call", "id": 99,
+            "params": {
+                "model": model, "method": "search_read", "args": [domain],
+                "kwargs": {
+                    "fields": fields, "limit": BATCH, "offset": offset,
+                    "context": {"allowed_company_ids": ALL_COMPANY_IDS}
+                }
+            }
+        }, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            raise RuntimeError(f"Error Odoo en {model}: {data['error']}")
+        batch = data.get("result", [])
+        if not batch:
+            break
+        records.extend(batch)
+        if label:
+            print(f"    {label}: {len(records)} ...", end="\r")
+        offset += len(batch)
+        if len(batch) < BATCH:
+            break
+    if label:
+        print(f"    {label}: {len(records)}  ✓         ")
+    return records
+
+
+# ══════════════════════════════════════════════════════════════
+# BAJADA
+# ══════════════════════════════════════════════════════════════
+def bajar_datos():
+    session = requests.Session()
+    session.headers.update({"Content-Type": "application/json"})
+
+    uid = login(session)
+    activar_multicompany(session, uid)
+
+    # 1. Lista canónica de talentos desde product.template
+    print("\n[1/7] Productos (talentos)...")
+    productos = fetch_all(
+        session,
+        model="product.template",
+        domain=[["purchase_ok", "=", True], ["sale_ok", "=", True],
+                ["name", "!=", "Booking Fees"]],
+        fields=["id", "name", "company_id"],
+        label="productos"
+    )
+    talent_names = sorted({p["name"] for p in productos if p.get("name") and p["name"] != "Booking Fees"})
+    print(f"    → {len(talent_names)} talentos únicos")
+
+    prod_template_by_name = {}
+    for p in productos:
+        prod_template_by_name.setdefault(p["name"], []).append(p["id"])
+
+    # 2. Subtareas
+    print("\n[2/7] Subtareas...")
+    subtareas = fetch_all(
+        session,
+        model="project.task",
+        domain=[["parent_id", "!=", False], ["sale_order_id", "!=", False]],
+        fields=["id", "name", "parent_id", "sale_order_id", "sale_line_id", "stage_id",
+                "x_studio_fecha_de_publicacin", "x_studio_fecha_limite",
+                "date_deadline", "company_id", "project_id"],
+        label="subtareas"
+    )
+
+    # 3. IDs únicos de sale.order
+    so_ids = list({
+        (t["sale_order_id"][0] if isinstance(t["sale_order_id"], list) else t["sale_order_id"])
+        for t in subtareas if t.get("sale_order_id")
+    })
+    print(f"\n[3/7] {len(so_ids)} sale orders referenciados")
+
+    # 4. Sale orders
+    print("\n[4/7] Sale orders...")
+    so_raw = []
+    for i in range(0, len(so_ids), 200):
+        so_raw.extend(fetch_all(
+            session,
+            model="sale.order",
+            domain=[["id", "in", so_ids[i:i+200]]],
+            fields=["id", "name", "state", "company_id", "amount_total",
+                    "amount_untaxed", "currency_id",
+                    "x_studio_campaas", "x_studio_campaas_1",
+                    "x_studio_bu", "x_studio_bu_1",
+                    "x_studio_tipo_de_contrato", "x_studio_nombre_de_la_campaa",
+                    "x_studio_marca", "date_order", "partner_id",
+                    "invoice_ids", "order_line",
+                    "x_studio_factura_o_boleta", "x_studio_selection_field_4kh_1it0ckuc4"],
+        ))
+
+    sale_orders = [
+        so for so in so_raw
+        if (so.get("company_id") and
+            (so["company_id"][0] if isinstance(so["company_id"], list) else so["company_id"]) != MEXICO_ID)
+        and so.get("state") in ("sale", "done")
+    ]
+    print(f"    {len(so_raw)} raw → {len(sale_orders)} válidos  ✓")
+    so_map = {so["id"]: so for so in sale_orders}
+
+    subtareas = [
+        t for t in subtareas
+        if so_map.get(t["sale_order_id"][0] if isinstance(t["sale_order_id"], list) else t["sale_order_id"])
+    ]
+
+    # 5. Sale order lines
+    print("\n[5/7] Líneas de venta...")
+    sol_ids_all = list({lid for so in sale_orders for lid in (so.get("order_line") or [])})
+    sol_map = {}
+    for i in range(0, len(sol_ids_all), 200):
+        lines = fetch_all(
+            session,
+            model="sale.order.line",
+            domain=[["id", "in", sol_ids_all[i:i+200]]],
+            fields=["id", "order_id", "product_id", "task_id"],
+        )
+        for line in lines:
+            if line.get("product_id"):
+                prod_name = line["product_id"][1] if isinstance(line["product_id"], list) else ""
+                sol_map[line["id"]] = _extract_talent_from_product(prod_name)
+
+    task_talent_map = {}
+    for t in subtareas:
+        if t.get("sale_line_id"):
+            sol_id = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"]
+            if sol_id in sol_map:
+                task_talent_map[t["id"]] = sol_map[sol_id]
+    for t in subtareas:
+        if t["id"] not in task_talent_map:
+            task_talent_map[t["id"]] = _extract_talent_from_task(t.get("name", ""))
+
+    print(f"    {len(sol_ids_all)} líneas procesadas  ✓")
+
+    # 6. Facturas de cliente
+    print("\n[6/7] Facturas de cliente...")
+    inv_ids = list({inv_id for so in sale_orders for inv_id in (so.get("invoice_ids") or [])})
+    client_invoices_map = defaultdict(list)
+    if inv_ids:
+        cinvs_raw = []
+        for i in range(0, len(inv_ids), 200):
+            cinvs_raw.extend(fetch_all(
+                session, model="account.move",
+                domain=[["id", "in", inv_ids[i:i+200]]],
+                fields=["id", "name", "move_type", "state", "payment_state",
+                        "invoice_date_due", "amount_untaxed", "amount_total", "currency_id"],
+            ))
+        inv_by_id = {i["id"]: i for i in cinvs_raw}
+        for so in sale_orders:
+            for inv_id in (so.get("invoice_ids") or []):
+                inv = inv_by_id.get(inv_id)
+                if inv and inv["move_type"] == "out_invoice" and inv["state"] != "cancel":
+                    client_invoices_map[so["id"]].append(inv)
+        print(f"    {len(inv_ids)} facturas  ✓")
+    else:
+        print("    Sin facturas")
+
+    # 7. Purchase orders y facturas proveedor
+    print("\n[7/7] OC y facturas proveedor...")
+    so_names = [so["name"] for so in sale_orders]
+    po_map = {}
+    pos_raw = []
+    if so_names:
+        for i in range(0, len(so_names), 200):
+            pos_raw.extend(fetch_all(
+                session, model="purchase.order",
+                domain=[["origin", "in", so_names[i:i+200]]],
+                fields=["id", "name", "origin", "state", "amount_untaxed", "invoice_ids"],
+            ))
+        for po in pos_raw:
+            if po.get("origin"):
+                po_map[po["origin"]] = po
+
+    vendor_invoices_map = defaultdict(list)
+    po_inv_ids = list({inv_id for po in pos_raw for inv_id in (po.get("invoice_ids") or [])})
+    if po_inv_ids:
+        vinvs_raw = []
+        for i in range(0, len(po_inv_ids), 200):
+            vinvs_raw.extend(fetch_all(
+                session, model="account.move",
+                domain=[["id", "in", po_inv_ids[i:i+200]]],
+                fields=["id", "name", "move_type", "state", "payment_state",
+                        "invoice_date_due", "amount_untaxed", "amount_total", "currency_id"],
+            ))
+        vinv_by_id = {v["id"]: v for v in vinvs_raw}
+        for po in pos_raw:
+            for inv_id in (po.get("invoice_ids") or []):
+                vinv = vinv_by_id.get(inv_id)
+                if vinv and vinv["move_type"] == "in_invoice" and vinv["state"] != "cancel":
+                    vendor_invoices_map[po["id"]].append(vinv)
+    print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
+
+    return talent_names, subtareas, task_talent_map, so_map, client_invoices_map, po_map, vendor_invoices_map
+
+
+# ══════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════
+def _extract_talent_from_product(prod_name):
+    if not prod_name:
+        return "Sin nombre"
+    idx = prod_name.find("(")
+    return prod_name[:idx].strip() if idx > 0 else prod_name.strip()
+
+
+def _extract_talent_from_task(task_name):
+    if not task_name:
+        return "Sin nombre"
+    idx = task_name.find("(")
+    return task_name[:idx].strip() if idx > 0 else task_name.strip()
+
+
+def pais_final(so):
+    """
+    Combina x_studio_campaas y x_studio_campaas_1 traduciendo
+    los valores internos de Odoo a sus etiquetas visibles.
+    """
+    if not so:
+        return ""
+    c1 = traducir_pais(so.get("x_studio_campaas"))
+    c2 = traducir_pais(so.get("x_studio_campaas_1"))
+    if c1 and c2 and c1 != c2:
+        return f"{c1} / {c2}"
+    return c1 or c2 or ""
+
+
+def get_currency(so):
+    if not so or not so.get("currency_id"):
+        return "USD"
+    v = so["currency_id"]
+    return v[1] if isinstance(v, (list, tuple)) else str(v)
+
+
+def get_marca(so):
+    if not so:
+        return "—"
+    v = so.get("x_studio_marca")
+    if not v or v is False:
+        return "—"
+    return v[1] if isinstance(v, (list, tuple)) else str(v)
+
+
+def get_factura_boleta(so):
+    """Concatena x_studio_factura_o_boleta y x_studio_selection_field_4kh_1it0ckuc4."""
+    def ex(v):
+        if not v or v is False:
+            return ""
+        if isinstance(v, (list, tuple)):
+            return str(v[1] if len(v) > 1 else v[0]).strip()
+        return str(v).strip()
+    f1 = ex(so.get("x_studio_factura_o_boleta"))
+    f2 = ex(so.get("x_studio_selection_field_4kh_1it0ckuc4"))
+    partes = [p for p in [f1, f2] if p]
+    return " / ".join(partes) if partes else ""
+
+
+def get_nums_facturas_prov(vinvs):
+    """Devuelve los números de facturas de proveedor separados por coma."""
+    nums = [v.get("name", "") for v in vinvs if v.get("name")]
+    return ", ".join(nums) if nums else ""
+
+
+def get_campana(so):
+    if not so:
+        return "—"
+    v = so.get("x_studio_nombre_de_la_campaa")
+    if not v or v is False:
+        return so.get("name", "—")
+    return str(v)
+
+
+def fmt_date(d):
+    if not d or d is False:
+        return None
+    try:
+        return datetime.fromisoformat(str(d)[:10]).strftime("%d/%m/%Y")
+    except Exception:
+        return str(d)
+
+
+def fmt_num(n):
+    if n is None:
+        return "—"
+    try:
+        return f"{float(n):,.0f}".replace(",", ".")
+    except Exception:
+        return str(n)
+
+
+def fmt_pct(numerator, denominator):
+    try:
+        if not denominator or float(denominator) == 0:
+            return "—"
+        pct = (float(numerator) / float(denominator)) * 100
+        return f"{pct:.1f}%"
+    except Exception:
+        return "—"
+
+
+def month_key(date_str):
+    try:
+        dt = datetime.fromisoformat(str(date_str)[:10])
+        return (dt.strftime("%Y-%m"), dt.strftime("%B %Y").capitalize())
+    except Exception:
+        return ("9999-99", "Sin fecha")
+
+
+def badge(cls, text):
+    return f'<span class="badge {cls}">{text}</span>'
+
+
+# ══════════════════════════════════════════════════════════════
+# CONSTRUCCIÓN DE DATOS POR TALENTO
+# ══════════════════════════════════════════════════════════════
+def construir_datos(talent_names, subtareas, task_talent_map, so_map,
+                    client_inv_map, po_map, vendor_inv_map):
+    talent_tasks = defaultdict(list)
+    for t in subtareas:
+        talent = task_talent_map.get(t["id"], _extract_talent_from_task(t.get("name", "")))
+        talent_tasks[talent].append(t)
+
+    talentos = {}
+    all_talents = sorted(set(talent_tasks.keys()) | set(talent_names))
+
+    for talent_name in all_talents:
+        tasks = talent_tasks.get(talent_name, [])
+        if not tasks:
+            continue
+
+        published, pending, so_ids_seen = [], [], set()
+
+        for t in tasks:
+            oid = t["sale_order_id"][0] if isinstance(t["sale_order_id"], list) else t["sale_order_id"]
+            so = so_map.get(oid)
+            if not so:
+                continue
+            so_ids_seen.add(so["id"])
+            fecha_pub = t.get("x_studio_fecha_de_publicacin")
+            if fecha_pub and fecha_pub is not False:
+                published.append({"task": t, "so": so})
+            else:
+                pending.append({"task": t, "so": so})
+
+        finance = []
+        for so_id in so_ids_seen:
+            so   = so_map[so_id]
+            neto = so.get("amount_untaxed") or 0
+            cur  = get_currency(so)
+
+            cinvs    = client_inv_map.get(so_id, [])
+            tot_fact = sum(i.get("amount_untaxed") or 0 for i in cinvs)
+            is_100   = bool(cinvs) and abs(tot_fact - neto) < 1
+            all_paid = bool(cinvs) and all(
+                i.get("payment_state") in ("paid", "in_payment") for i in cinvs
+            )
+            pct_fact    = round((tot_fact / neto) * 100) if neto > 0 else 0
+            dues        = sorted(i["invoice_date_due"] for i in cinvs if i.get("invoice_date_due"))
+            vencimiento = fmt_date(dues[-1]) if dues else None
+
+            if not cinvs:
+                factura_status = "pendiente_factura"
+                cobro_status, cobro_fecha = None, None
+            elif is_100:
+                factura_status = "100"
+                cobro_status   = "cobrado" if all_paid else "pendiente_cobro"
+                cobro_fecha    = vencimiento if all_paid else None
+            else:
+                factura_status = f"{pct_fact}%"
+                cobro_status, cobro_fecha = None, None
+
+            po       = po_map.get(so["name"])
+            v_neto   = None
+            v_status = None
+            v_fecha  = None
+            v_nums   = ""
+            if po:
+                vinvs = vendor_inv_map.get(po["id"], [])
+                if vinvs:
+                    v_neto   = sum(i.get("amount_untaxed") or 0 for i in vinvs)
+                    v_paid   = all(i.get("payment_state") in ("paid", "in_payment") for i in vinvs)
+                    v_dues   = sorted(i["invoice_date_due"] for i in vinvs if i.get("invoice_date_due"))
+                    v_fecha  = fmt_date(v_dues[-1]) if v_dues else None
+                    v_status = "pagado" if v_paid else "pendiente"
+                    v_nums   = get_nums_facturas_prov(vinvs)
+                else:
+                    v_status = "sin_factura"
+
+            pct_talento  = fmt_pct(v_neto, neto) if v_neto is not None else "—"
+            fact_boleta  = get_factura_boleta(so)
+
+            finance.append({
+                "so": so, "neto": neto, "cur": cur,
+                "factura_status": factura_status, "pct_fact": pct_fact,
+                "vencimiento": vencimiento,
+                "cobro_status": cobro_status, "cobro_fecha": cobro_fecha,
+                "tiene_po": po is not None,
+                "v_neto": v_neto, "v_status": v_status, "v_fecha": v_fecha,
+                "v_nums": v_nums,
+                "pct_talento": pct_talento,
+                "fact_boleta": fact_boleta,
+            })
+
+        finance.sort(key=lambda x: x["so"].get("name", ""))
+        talentos[talent_name] = {
+            "published": published,
+            "pending":   pending,
+            "finance":   finance,
+        }
+
+    return talentos
+
+
+# ══════════════════════════════════════════════════════════════
+# RENDER HTML
+# ══════════════════════════════════════════════════════════════
+def render_published(published):
+    if not published:
+        return '<div class="empty-msg"><span class="icon">📭</span>Sin contenidos publicados</div>'
+
+    by_month = defaultdict(list)
+    for item in published:
+        mk, ml = month_key(item["task"]["x_studio_fecha_de_publicacin"])
+        by_month[(mk, ml)].append(item)
+
+    html = ""
+    for i, ((mk, ml), items) in enumerate(sorted(by_month.items(), key=lambda x: x[0][0], reverse=True)):
+        gid  = f"mg-{mk}-{i}"
+        tots = defaultdict(float)
+        for it in items:
+            tots[get_currency(it["so"])] += it["so"].get("amount_untaxed") or 0
+        tot_str = "  ·  ".join(f"{c} {fmt_num(v)}" for c, v in tots.items())
+
+        rows = ""
+        for it in items:
+            t, so = it["task"], it["so"]
+            son  = t["sale_order_id"][1] if isinstance(t["sale_order_id"], list) else str(t["sale_order_id"])
+            pais = pais_final(so)
+            rows += f"""<tr>
+              <td><span class="num">{son}</span></td>
+              <td><span class="tnc">{t.get("name","—")}</span></td>
+              <td><span class="sm">{get_marca(so)}</span></td>
+              <td><span class="sm">{get_campana(so)}</span></td>
+              <td>{badge("bd", get_currency(so))}</td>
+              <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
+              <td><span class="dv">{fmt_date(t["x_studio_fecha_de_publicacin"]) or "—"}</span></td>
+              <td><span class="pt">{pais or "—"}</span></td>
+            </tr>"""
+
+        html += f"""
+        <div class="mg" id="{gid}">
+          <div class="mh" onclick="tog('{gid}')">
+            <div class="mt">{ml.capitalize()} {badge("bd", f"{len(items)} cont.")}</div>
+            <div class="ms">{tot_str} <span class="chv">▾</span></div>
+          </div>
+          <div class="mb"><div class="tw"><table>
+            <thead><tr>
+              <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
+              <th>Moneda</th><th class="r">Neto</th><th>Publicación</th><th>País campaña</th>
+            </tr></thead>
+            <tbody>{rows}</tbody>
+          </table></div></div>
+        </div>"""
+    return html
+
+
+def render_pending(pending):
+    if not pending:
+        return '<div class="empty-msg"><span class="icon">✅</span>Sin contenidos pendientes</div>'
+
+    rows = ""
+    for it in pending:
+        t, so = it["task"], it["so"]
+        son  = t["sale_order_id"][1] if isinstance(t["sale_order_id"], list) else str(t["sale_order_id"])
+        est  = t.get("x_studio_fecha_limite") or t.get("date_deadline")
+        est_html = f'<span class="de">{fmt_date(est)}</span>' if (est and est is not False) else badge("bd", "Sin fecha")
+        pais = pais_final(so)
+        rows += f"""<tr>
+          <td><span class="num">{son}</span></td>
+          <td><span class="tnc">{t.get("name","—")}</span></td>
+          <td><span class="sm">{get_marca(so)}</span></td>
+          <td><span class="sm">{get_campana(so)}</span></td>
+          <td>{badge("bd", get_currency(so))}</td>
+          <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
+          <td>{est_html}</td>
+          <td><span class="pt">{pais or "—"}</span></td>
+        </tr>"""
+
+    return f"""<div class="tw"><table>
+      <thead><tr>
+        <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
+        <th>Moneda</th><th class="r">Neto</th><th>Fecha estimada</th><th>País campaña</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table></div>"""
+
+
+def render_finance(finance):
+    if not finance:
+        return '<div class="empty-msg"><span class="icon">📋</span>Sin ventas</div>'
+
+    tots = defaultdict(float)
+    for f in finance:
+        tots[f["cur"]] += f["neto"]
+
+    summary = '<div class="ss">'
+    for c, v in tots.items():
+        cnt = sum(1 for f in finance if f["cur"] == c)
+        summary += f'<div class="sc"><div class="sl">Neto {c}</div><div class="sv">{fmt_num(v)}</div><div class="sb">{cnt} ventas</div></div>'
+    summary += '</div>'
+
+    rows = ""
+    for f in finance:
+        so = f["so"]
+
+        fs = f["factura_status"]
+        fact_h = (badge("by", "Pendiente factura") if fs == "pendiente_factura"
+                  else badge("bg", "✓ 100%") if fs == "100"
+                  else badge("by", f"{fs} facturado"))
+
+        venc_h  = (f'<span class="dv">{f["vencimiento"]}</span>' if f["vencimiento"]
+                   else badge("bd", "—"))
+
+        cs = f["cobro_status"]
+        cobro_h = (f'<span class="badge bg">{f["cobro_fecha"] or "Cobrado"}</span>' if cs == "cobrado"
+                   else badge("by", "Pendiente cobro") if cs == "pendiente_cobro"
+                   else badge("bd", "—"))
+
+        if not f["tiene_po"]:
+            np_h   = badge("bd", "Sin OC")
+            pago_h = badge("bd", "—")
+        else:
+            vs = f["v_status"]
+            np_h = (badge("bd", "Sin fact. prov.") if vs == "sin_factura"
+                    else f'<span class="mf"><span class="ct">{f["cur"]}</span>{fmt_num(f["v_neto"])}</span>')
+            pago_h = (f'<span class="badge bg">{f["v_fecha"] or "Pagado"}</span>' if vs == "pagado"
+                      else badge("br", "Pendiente pago") if vs == "pendiente"
+                      else badge("bd", "—"))
+
+        pct_h = f'<span class="pct">{f["pct_talento"]}</span>' if f["pct_talento"] != "—" else badge("bd", "—")
+
+        fb_h  = f'<span class="sm">{f["fact_boleta"]}</span>' if f["fact_boleta"] else badge("bd", "—")
+        vn_h  = f'<span class="sm">{f["v_nums"]}</span>' if f.get("v_nums") else badge("bd", "—")
+
+        rows += f"""<tr>
+          <td><span class="num">{so["name"]}</span></td>
+          <td><span class="sm">{get_marca(so)}</span></td>
+          <td><span class="sm">{get_campana(so)}</span></td>
+          <td>{badge("bd", f["cur"])}</td>
+          <td class="amt">{fmt_num(f["neto"])}</td>
+          <td>{fb_h}</td>
+          <td>{fact_h}</td><td>{venc_h}</td><td>{cobro_h}</td>
+          <td class="amt">{np_h}</td>
+          <td>{vn_h}</td>
+          <td class="amt">{pct_h}</td>
+          <td>{pago_h}</td>
+        </tr>"""
+
+    table = f"""<div class="tw"><table>
+      <thead><tr>
+        <th>N° Venta</th><th>Marca</th><th>Campaña</th><th>Moneda</th>
+        <th class="r">Neto</th><th>Fact/Boleta</th><th>Fact. cliente</th><th>Vencimiento</th>
+        <th>Cobro 100%</th><th class="r">Fact. proveedor</th>
+        <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table></div>"""
+
+    return summary + table
+
+
+# ══════════════════════════════════════════════════════════════
+# CSS / JS EMBEBIDOS
+# ══════════════════════════════════════════════════════════════
+CSS = """
+:root{
+  --bg:#0B0D13;--sf:#13161F;--sf2:#1C2030;--br:#252A3A;--br2:#303650;
+  --ac:#4DFFC3;--tx:#E4E8F4;--mu:#7A819A;--di:#404560;
+  --gn:#2ECC71;--gnb:rgba(46,204,113,.1);
+  --yw:#F0B429;--ywb:rgba(240,180,41,.1);
+  --rd:#FF4D6A;--rdb:rgba(255,77,106,.1);
+  --mo:'IBM Plex Mono',monospace;--sa:'IBM Plex Sans',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font-family:var(--sa);font-size:13px;min-height:100vh}
+.hdr{padding:24px 32px 18px;border-bottom:1px solid var(--br);display:flex;align-items:center;justify-content:space-between}
+.lm{width:34px;height:34px;background:var(--ac);border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:var(--mo);font-size:12px;color:#0B0D13;font-weight:600}
+.lo{display:flex;align-items:center;gap:12px}
+.lt{font-size:15px;font-weight:600;letter-spacing:-.3px}
+.ls{font-size:10px;color:var(--mu);font-family:var(--mo);letter-spacing:.8px}
+.lu{font-family:var(--mo);font-size:11px;color:var(--di)}
+.ts{padding:16px 32px;border-bottom:1px solid var(--br)}
+.tl{font-size:10px;font-family:var(--mo);letter-spacing:1.2px;color:var(--mu);text-transform:uppercase;margin-bottom:10px}
+.sw{position:relative;max-width:280px;margin-bottom:10px}
+.sw input{width:100%;background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:7px 10px 7px 30px;border-radius:7px;font-size:12px;font-family:var(--sa);outline:none;transition:.15s}
+.sw input:focus{border-color:var(--ac)}
+.sw svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);color:var(--mu)}
+.pills{display:flex;flex-wrap:wrap;gap:7px}
+.pill{background:var(--sf);border:1px solid var(--br2);color:var(--mu);padding:5px 13px;border-radius:20px;cursor:pointer;font-size:12px;font-weight:500;transition:.15s;white-space:nowrap}
+.pill:hover{border-color:var(--ac);color:var(--ac)}
+.pill.active{background:rgba(77,255,195,.07);border-color:var(--ac);color:var(--ac)}
+.tbar{padding:0 32px;border-bottom:1px solid var(--br);display:flex}
+.tb{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--mu);padding:12px 18px;cursor:pointer;font-size:13px;font-family:var(--sa);font-weight:500;transition:.15s;display:flex;align-items:center;gap:7px;margin-bottom:-1px}
+.tb:hover{color:var(--tx)}.tb.active{color:var(--ac);border-bottom-color:var(--ac)}
+.tc{background:var(--sf2);border-radius:10px;padding:1px 7px;font-size:10px;font-family:var(--mo)}
+.main{padding:20px 32px}
+.panel{display:none}.panel.active{display:block}
+.ns{display:flex;flex-direction:column;align-items:center;padding:50px 0;gap:12px;color:var(--di)}
+.ns .ar{font-size:22px;animation:bn 1.8s ease-in-out infinite}
+@keyframes bn{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+.empty-msg{display:flex;align-items:center;justify-content:center;padding:44px 0;gap:10px;color:var(--di);font-size:13px}
+.empty-msg .icon{font-size:22px;opacity:.4}
+.mg{margin-bottom:10px;border:1px solid var(--br);border-radius:9px;overflow:hidden}
+.mh{padding:10px 16px;background:var(--sf);display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;transition:.15s}
+.mh:hover{background:var(--sf2)}
+.mt{font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px}
+.ms{display:flex;gap:12px;align-items:center;font-family:var(--mo);font-size:11px;color:var(--mu)}
+.chv{transition:.2s;font-size:11px;color:var(--mu)}
+.mg.cl .chv{transform:rotate(-90deg)}
+.mb{border-top:1px solid var(--br)}
+.mg.cl .mb{display:none}
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:9px 13px;font-size:10px;font-family:var(--mo);letter-spacing:.7px;color:var(--mu);text-transform:uppercase;border-bottom:1px solid var(--br);white-space:nowrap;background:var(--sf)}
+th.r{text-align:right}
+td{padding:10px 13px;border-bottom:1px solid var(--br);vertical-align:middle;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.015)}
+.num{font-family:var(--mo);font-size:12px;color:var(--ac);font-weight:500}
+.tnc{font-weight:500;max-width:200px;overflow:hidden;text-overflow:ellipsis;display:block}
+.sm{color:var(--mu);font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;display:block}
+.amt{font-family:var(--mo);font-size:12px;text-align:right}
+.pt{display:inline-block;background:var(--sf2);border:1px solid var(--br2);border-radius:4px;padding:2px 7px;font-size:10px;font-family:var(--mo);color:var(--mu)}
+.dv{font-family:var(--mo);font-size:12px}
+.de{font-family:var(--mo);font-size:12px;color:var(--yw)}
+.mf{font-family:var(--mo);font-size:12px}
+.ct{font-size:10px;color:var(--mu);margin-right:3px}
+.pct{font-family:var(--mo);font-size:12px;color:var(--ac)}
+.badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:4px;font-size:11px;font-family:var(--mo);font-weight:500}
+.bg{background:var(--gnb);color:var(--gn)}
+.by{background:var(--ywb);color:var(--yw)}
+.br{background:var(--rdb);color:var(--rd)}
+.bd{background:var(--sf2);color:var(--di)}
+.ss{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.sc{background:var(--sf);border:1px solid var(--br);border-radius:8px;padding:12px 18px;min-width:150px;flex:1}
+.sl{font-size:10px;font-family:var(--mo);color:var(--mu);letter-spacing:.7px;text-transform:uppercase;margin-bottom:5px}
+.sv{font-size:19px;font-weight:600;font-family:var(--mo);color:var(--ac)}
+.sb{font-size:11px;color:var(--mu);margin-top:2px}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--br2);border-radius:3px}
+/* ── DROPDOWN ── */
+.dd-wrap{position:relative;max-width:320px}
+.dd-trigger{display:flex;align-items:center;justify-content:space-between;background:var(--sf);border:1px solid var(--br2);border-radius:8px;padding:8px 12px;cursor:pointer;transition:.15s;gap:10px}
+.dd-trigger:hover{border-color:var(--ac)}
+.dd-trigger.open{border-color:var(--ac);border-bottom-left-radius:0;border-bottom-right-radius:0}
+.dd-selected{font-size:13px;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.dd-selected.placeholder{color:var(--mu)}
+.dd-arrow{color:var(--mu);font-size:11px;transition:.2s;flex-shrink:0}
+.dd-list{display:none;position:absolute;top:100%;left:0;right:0;background:var(--sf);border:1px solid var(--ac);border-top:none;border-bottom-left-radius:8px;border-bottom-right-radius:8px;z-index:100;max-height:320px;overflow:hidden;flex-direction:column}
+.dd-list.open-list{display:flex}
+.dd-search{padding:8px 10px;border-bottom:1px solid var(--br)}
+.dd-search input{width:100%;background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:6px 10px;border-radius:6px;font-size:12px;font-family:var(--sa);outline:none}
+.dd-search input:focus{border-color:var(--ac)}
+.dd-items{overflow-y:auto;max-height:260px}
+.dd-item{padding:8px 14px;font-size:12px;color:var(--mu);cursor:pointer;transition:.1s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dd-item:hover{background:var(--sf2);color:var(--ac)}
+.dd-item.selected{color:var(--ac);background:rgba(77,255,195,.05)}
+"""
+
+JS = """
+var _dropOpen = false;
+
+function fp(q) {
+  var items = document.querySelectorAll('.dd-item');
+  var hasResult = false;
+  items.forEach(function(it) {
+    var match = it.dataset.t.toLowerCase().indexOf(q.toLowerCase()) >= 0;
+    it.style.display = match ? '' : 'none';
+    if (match) hasResult = true;
+  });
+  if (q.length > 0 && !_dropOpen) openDrop();
+}
+
+function openDrop() {
+  _dropOpen = true;
+  document.getElementById('dd-list').style.display = 'block';
+  document.getElementById('dd-arrow').style.transform = 'rotate(180deg)';
+}
+
+function closeDrop() {
+  _dropOpen = false;
+  document.getElementById('dd-list').style.display = 'none';
+  document.getElementById('dd-arrow').style.transform = 'rotate(0deg)';
+}
+
+function toggleDrop() {
+  if (_dropOpen) { closeDrop(); } else { openDrop(); }
+}
+
+document.addEventListener('click', function(e) {
+  var wrap = document.getElementById('dd-wrap');
+  if (wrap && !wrap.contains(e.target)) closeDrop();
+});
+
+function selTalent(name) {
+  document.getElementById('dd-input').value = name;
+  document.getElementById('dd-selected').textContent = name;
+  closeDrop();
+  var sec = document.querySelector('#data .td[data-t="' + name.replace(/"/g,'&quot;') + '"]');
+  if (!sec) return;
+  document.getElementById('pp').innerHTML = sec.querySelector('.tp').innerHTML;
+  document.getElementById('pe').innerHTML = sec.querySelector('.te').innerHTML;
+  document.getElementById('pf').innerHTML = sec.querySelector('.tf').innerHTML;
+  document.getElementById('cp').textContent = sec.dataset.pub;
+  document.getElementById('ce').textContent = sec.dataset.pend;
+  document.getElementById('cf').textContent = sec.dataset.fin;
+  document.querySelectorAll('.tb').forEach(function(b){b.classList.remove('active');});
+  document.querySelector('.tb[data-tab="p"]').classList.add('active');
+  document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('active');});
+  document.getElementById('pp').classList.add('active');
+}
+
+function st(tab, btn) {
+  document.querySelectorAll('.tb').forEach(function(b){b.classList.remove('active');});
+  btn.classList.add('active');
+  document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('active');});
+  document.getElementById('p'+tab).classList.add('active');
+}
+
+function tog(id) {
+  var el = document.getElementById(id);
+  if (el) el.classList.toggle('cl');
+}
+"""
+
+
+# ══════════════════════════════════════════════════════════════
+# ENSAMBLE HTML
+# ══════════════════════════════════════════════════════════════
+def generar_html(talentos):
+    now = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    dd_items = "\n".join(
+        f'<div class="dd-item" data-t="{n.replace(chr(34), "&quot;")}" onclick="selTalent(this.dataset.t)">{n}</div>'
+        for n in sorted(talentos.keys())
+    )
+
+    sections = ""
+    for name, data in talentos.items():
+        ne = name.replace('"', '&quot;').replace("'", "&#39;")
+        sections += f"""
+<div class="td" data-t="{ne}"
+     data-pub="{len(data["published"])}"
+     data-pend="{len(data["pending"])}"
+     data-fin="{len(data["finance"])}">
+  <div class="tp">{render_published(data["published"])}</div>
+  <div class="te">{render_pending(data["pending"])}</div>
+  <div class="tf">{render_finance(data["finance"])}</div>
+</div>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Talentos ZAS — Finanzas</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>{CSS}</style>
+</head>
+<body>
+<div class="hdr">
+  <div class="lo">
+    <div class="lm">ZAS</div>
+    <div><div class="lt">Seguimiento de Talentos</div><div class="ls">FINANZAS · ODOO</div></div>
+  </div>
+  <span class="lu">Generado: {now}</span>
+</div>
+<div class="ts">
+  <div class="tl">Talento</div>
+  <div class="dd-wrap" id="dd-wrap">
+    <div class="dd-trigger" onclick="toggleDrop()">
+      <span class="dd-selected placeholder" id="dd-selected">Seleccioná un talento...</span>
+      <span class="dd-arrow" id="dd-arrow">▾</span>
+    </div>
+    <div class="dd-list" id="dd-list">
+      <div class="dd-search">
+        <input type="text" id="dd-input" placeholder="Buscar talento..." oninput="fp(this.value)" autocomplete="off">
+      </div>
+      <div class="dd-items" id="dd-items">
+{dd_items}
+      </div>
+    </div>
+  </div>
+</div>
+<div class="tbar">
+  <button class="tb active" data-tab="p" onclick="st('p',this)">Publicados <span class="tc" id="cp">—</span></button>
+  <button class="tb" data-tab="e" onclick="st('e',this)">Pendientes <span class="tc" id="ce">—</span></button>
+  <button class="tb" data-tab="f" onclick="st('f',this)">Finanzas <span class="tc" id="cf">—</span></button>
+</div>
+<div class="main">
+  <div class="panel active" id="pp"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
+  <div class="panel" id="pe"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
+  <div class="panel" id="pf"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
+</div>
+<div style="display:none" id="data">{sections}</div>
+<script>{JS}</script>
+</body>
+</html>"""
+
+
+# ══════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════
+if __name__ == "__main__":
+    print("=" * 55)
+    print("  Dashboard Talentos ZAS")
+    print("=" * 55)
+    try:
+        talent_names, subtareas, task_talent_map, so_map, \
+            client_inv_map, po_map, vendor_inv_map = bajar_datos()
+
+        print("\nConstruyendo datos...")
+        talentos = construir_datos(talent_names, subtareas, task_talent_map,
+                                   so_map, client_inv_map, po_map, vendor_inv_map)
+        print(f"  ✓ {len(talentos)} talentos con datos")
+
+        print("\nGenerando HTML...")
+        html = generar_html(talentos)
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write(html)
+
+        total_pub  = sum(len(d["published"]) for d in talentos.values())
+        total_pend = sum(len(d["pending"])   for d in talentos.values())
+        total_fin  = sum(len(d["finance"])   for d in talentos.values())
+        print(f"\n✓ Generado: {OUTPUT_FILE}")
+        print(f"  Talentos:   {len(talentos)}")
+        print(f"  Publicados: {total_pub}  |  Pendientes: {total_pend}  |  Ventas: {total_fin}")
+        print("=" * 55)
+
+    except Exception as e:
+        print(f"\n✗ ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1)
