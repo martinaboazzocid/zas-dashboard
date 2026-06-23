@@ -2,10 +2,8 @@ name: Dashboard ZAS — Actualización diaria
 
 on:
   schedule:
-    # 10:30 AM Argentina (ART = UTC-3) → 13:30 UTC
     - cron: '30 13 * * *'
   workflow_dispatch:
-    # Permite correrlo manualmente desde GitHub con un click
 
 permissions:
   contents: write
@@ -13,17 +11,16 @@ permissions:
 jobs:
   generar:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repositorio
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Instalar Python
+      - name: Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Instalar dependencias
+      - name: Dependencias
         run: pip install requests
 
       - name: Generar dashboard
@@ -31,10 +28,10 @@ jobs:
           ODOO_PASS: ${{ secrets.ODOO_PASS }}
         run: python generar_dashboard.py
 
-      - name: Publicar en GitHub Pages
+      - name: Publicar
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: .
           publish_branch: gh-pages
-          commit_message: "Dashboard actualizado ${{ github.run_number }}"
+          commit_message: "update"
