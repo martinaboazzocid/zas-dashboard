@@ -272,7 +272,9 @@ def bajar_datos():
         for so in sale_orders:
             for inv_id in (so.get("invoice_ids") or []):
                 inv = inv_by_id.get(inv_id)
-                if inv and inv["move_type"] == "out_invoice" and inv["state"] != "cancel":
+                # Incluimos facturas (out_invoice) Y notas de crédito (out_refund)
+                # Las NC se guardan con signo positivo en Odoo; las restaremos al calcular
+                if inv and inv["move_type"] in ("out_invoice", "out_refund") and inv["state"] != "cancel":
                     client_invoices_map[so["id"]].append(inv)
         print(f"    {len(inv_ids)} facturas  ✓")
     else:
@@ -480,16 +482,20 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
             cur  = get_currency(so)
 
             cinvs    = client_inv_map.get(so_id, [])
-            tot_fact = sum(i.get("amount_untaxed") or 0 for i in cinvs)
-            is_100   = bool(cinvs) and abs(tot_fact - neto) < 1
-            all_paid = bool(cinvs) and all(
-                i.get("payment_state") in ("paid", "in_payment") for i in cinvs
+            # Facturas positivas; notas de crédito se restan
+            facturas = [i for i in cinvs if i.get("move_type") == "out_invoice"]
+            notas_cr = [i for i in cinvs if i.get("move_type") == "out_refund"]
+            tot_fact = (sum(i.get("amount_untaxed") or 0 for i in facturas)
+                        - sum(i.get("amount_untaxed") or 0 for i in notas_cr))
+            is_100   = bool(facturas) and abs(tot_fact - neto) < 1
+            all_paid = bool(facturas) and all(
+                i.get("payment_state") in ("paid", "in_payment") for i in facturas
             )
             pct_fact    = round((tot_fact / neto) * 100) if neto > 0 else 0
-            dues        = sorted(i["invoice_date_due"] for i in cinvs if i.get("invoice_date_due"))
+            dues        = sorted(i["invoice_date_due"] for i in facturas if i.get("invoice_date_due"))
             vencimiento = fmt_date(dues[-1]) if dues else None
 
-            if not cinvs:
+            if not facturas:
                 factura_status = "pendiente_factura"
                 cobro_status, cobro_fecha = None, None
             elif is_100:
@@ -530,6 +536,7 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
                 "v_nums": v_nums,
                 "pct_talento": pct_talento,
                 "fact_boleta": fact_boleta,
+                "pais": pais_final(so),
             })
 
         finance.sort(key=lambda x: x["so"].get("name", ""))
@@ -673,26 +680,71 @@ def render_finance(finance):
         fb_h  = f'<span class="sm">{f["fact_boleta"]}</span>' if f["fact_boleta"] else badge("bd", "—")
         vn_h  = f'<span class="sm">{f["v_nums"]}</span>' if f.get("v_nums") else badge("bd", "—")
 
+        campana_txt = get_campana(so)
+        campana_esc = campana_txt.replace('"', '&quot;')
+        campana_h   = f'<span class="sm" title="{campana_esc}">{campana_txt}</span>'
+
+        pais_txt = f["pais"] or "—"
+        pais_h   = f'<span class="pt">{pais_txt}</span>'
+
         rows += f"""<tr>
-          <td><span class="num">{so["name"]}</span></td>
-          <td><span class="sm">{get_marca(so)}</span></td>
-          <td><span class="sm">{get_campana(so)}</span></td>
-          <td>{badge("bd", f["cur"])}</td>
-          <td class="amt">{fmt_num(f["neto"])}</td>
-          <td>{fb_h}</td>
-          <td>{fact_h}</td><td>{venc_h}</td><td>{cobro_h}</td>
-          <td class="amt">{np_h}</td>
-          <td>{vn_h}</td>
-          <td class="amt">{pct_h}</td>
-          <td>{pago_h}</td>
+          <td data-v="{so["name"]}"><span class="num">{so["name"]}</span></td>
+          <td data-v="{get_marca(so)}"><span class="sm">{get_marca(so)}</span></td>
+          <td data-v="{campana_txt}">{campana_h}</td>
+          <td data-v="{f["cur"]}">{badge("bd", f["cur"])}</td>
+          <td class="amt" data-v="{f["neto"]}">{fmt_num(f["neto"])}</td>
+          <td data-v="{f["fact_boleta"]}">{fb_h}</td>
+          <td data-v="{fs}">{fact_h}</td>
+          <td data-v="{f["vencimiento"] or ""}">{venc_h}</td>
+          <td data-v="{f["cobro_status"] or ""}">{cobro_h}</td>
+          <td class="amt" data-v="{f["v_neto"] or 0}">{np_h}</td>
+          <td data-v="{f.get("v_nums","")}">{vn_h}</td>
+          <td class="amt" data-v="{f["pct_talento"]}">{pct_h}</td>
+          <td data-v="{f["v_status"] or ""}">{pago_h}</td>
+          <td data-v="{pais_txt}">{pais_h}</td>
         </tr>"""
 
-    table = f"""<div class="tw"><table>
+    table = f"""<div class="tw">
+      <div class="fbar" id="fbar">
+        <span class="flab">Filtrar:</span>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">Moneda</label>
+          <select class="fsel" data-col="3" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">Fact. cliente</label>
+          <select class="fsel" data-col="6" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">Cobro</label>
+          <select class="fsel" data-col="8" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">Pago talento</label>
+          <select class="fsel" data-col="12" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">País campaña</label>
+          <select class="fsel" data-col="13" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todos</option>
+          </select>
+        </div>
+        <button class="fclr" onclick="clearFinFilters(this.closest('.tw'))">✕ Limpiar</button>
+      </div>
+      <table>
       <thead><tr>
         <th>N° Venta</th><th>Marca</th><th>Campaña</th><th>Moneda</th>
         <th class="r">Neto</th><th>Fact/Boleta</th><th>Fact. cliente</th><th>Vencimiento</th>
         <th>Cobro 100%</th><th class="r">Fact. proveedor</th>
-        <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th>
+        <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th><th>País campaña</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
@@ -797,6 +849,16 @@ tr:hover td{background:rgba(255,255,255,.015)}
 .dd-item{padding:8px 14px;font-size:12px;color:var(--mu);cursor:pointer;transition:.1s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dd-item:hover{background:var(--sf2);color:var(--ac)}
 .dd-item.selected{color:var(--ac);background:rgba(77,255,195,.05)}
+/* ── FILTROS FINANZAS ── */
+.fbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:10px 14px;background:var(--sf2);border-bottom:1px solid var(--br)}
+.flab{font-size:10px;font-family:var(--mo);letter-spacing:.7px;color:var(--mu);text-transform:uppercase;margin-right:2px}
+.fsel-wrap{display:flex;flex-direction:column;gap:3px}
+.fsel-lbl{font-size:10px;font-family:var(--mo);color:var(--di);letter-spacing:.5px}
+.fsel{background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:5px 10px;border-radius:6px;font-size:12px;font-family:var(--sa);outline:none;cursor:pointer;transition:.15s}
+.fsel:focus,.fsel:hover{border-color:var(--ac)}
+.fclr{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:5px 12px;border-radius:6px;font-size:11px;font-family:var(--mo);cursor:pointer;transition:.15s;align-self:flex-end}
+.fclr:hover{border-color:var(--rd);color:var(--rd)}
+tr.fin-hidden{display:none}
 """
 
 JS = """
@@ -862,6 +924,61 @@ function st(tab, btn) {
 function tog(id) {
   var el = document.getElementById(id);
   if (el) el.classList.toggle('cl');
+}
+
+// ── FILTROS FINANZAS ──
+function populateFinFilters(tw) {
+  var sels = tw.querySelectorAll('.fsel');
+  sels.forEach(function(sel) {
+    var col = parseInt(sel.dataset.col);
+    var vals = new Set();
+    tw.querySelectorAll('tbody tr').forEach(function(tr) {
+      var td = tr.cells[col];
+      if (td) vals.add(td.dataset.v || '');
+    });
+    var current = sel.value;
+    // Mantener solo la opción vacía y agregar las nuevas
+    while (sel.options.length > 1) sel.remove(1);
+    Array.from(vals).sort().forEach(function(v) {
+      if (v) {
+        var opt = document.createElement('option');
+        opt.value = v; opt.textContent = v;
+        sel.appendChild(opt);
+      }
+    });
+    if (current) sel.value = current;
+  });
+}
+
+function applyFinFilter(tw) {
+  var sels = tw.querySelectorAll('.fsel');
+  var filters = [];
+  sels.forEach(function(sel) {
+    if (sel.value) filters.push({col: parseInt(sel.dataset.col), val: sel.value});
+  });
+  tw.querySelectorAll('tbody tr').forEach(function(tr) {
+    var show = filters.every(function(f) {
+      var td = tr.cells[f.col];
+      return td && (td.dataset.v || '') === f.val;
+    });
+    tr.classList.toggle('fin-hidden', !show);
+  });
+}
+
+function clearFinFilters(tw) {
+  tw.querySelectorAll('.fsel').forEach(function(sel) { sel.value = ''; });
+  tw.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.remove('fin-hidden'); });
+}
+
+// Poblar filtros al cambiar de talento
+var _origSelTalent = selTalent;
+function selTalent(name) {
+  _origSelTalent(name);
+  // pequeño delay para que el DOM se actualice
+  setTimeout(function() {
+    var tw = document.querySelector('#pf .tw');
+    if (tw) populateFinFilters(tw);
+  }, 10);
 }
 """
 
