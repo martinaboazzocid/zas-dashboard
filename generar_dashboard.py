@@ -912,6 +912,11 @@ function selTalent(name) {
   document.querySelector('.tb[data-tab="p"]').classList.add('active');
   document.querySelectorAll('.panel').forEach(function(p){p.classList.remove('active');});
   document.getElementById('pp').classList.add('active');
+  // Poblar filtros de finanzas
+  setTimeout(function() {
+    var tw = document.querySelector('#pf .tw');
+    if (tw) populateFinFilters(tw);
+  }, 10);
 }
 
 function st(tab, btn) {
@@ -968,17 +973,6 @@ function applyFinFilter(tw) {
 function clearFinFilters(tw) {
   tw.querySelectorAll('.fsel').forEach(function(sel) { sel.value = ''; });
   tw.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.remove('fin-hidden'); });
-}
-
-// Poblar filtros al cambiar de talento
-var _origSelTalent = selTalent;
-function selTalent(name) {
-  _origSelTalent(name);
-  // pequeño delay para que el DOM se actualice
-  setTimeout(function() {
-    var tw = document.querySelector('#pf .tw');
-    if (tw) populateFinFilters(tw);
-  }, 10);
 }
 """
 
