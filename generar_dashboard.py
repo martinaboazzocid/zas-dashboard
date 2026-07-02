@@ -900,6 +900,13 @@ tr.fin-hidden{display:none}
 .fsel-num{width:60px;background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:5px 8px;border-radius:6px;font-size:12px;font-family:var(--mo);outline:none;transition:.15s;-moz-appearance:textfield}
 .fsel-num::-webkit-outer-spin-button,.fsel-num::-webkit-inner-spin-button{-webkit-appearance:none}
 .fsel-num:focus,.fsel-num:hover{border-color:var(--ac)}
+.exp-bar{display:flex;justify-content:flex-end;padding:10px 14px 0}
+.exp-wrap{position:relative}
+.exp-btn{background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 14px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.15s;display:flex;align-items:center;gap:6px}
+.exp-btn:hover{border-color:var(--ac);color:var(--ac)}
+.exp-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);background:var(--sf2);border:1px solid var(--br2);border-radius:8px;min-width:170px;z-index:20;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.exp-item{padding:10px 14px;font-size:12.5px;cursor:pointer;transition:.12s;white-space:nowrap}
+.exp-item:hover{background:var(--sf);color:var(--ac)}
 """
 
 JS = r"""
@@ -941,9 +948,9 @@ function selTalent(name) {
   closeDrop();
   var sec = document.querySelector('#data .td[data-t="' + name.replace(/"/g,'&quot;') + '"]');
   if (!sec) return;
-  document.getElementById('pp').innerHTML = sec.querySelector('.tp').innerHTML;
-  document.getElementById('pe').innerHTML = sec.querySelector('.te').innerHTML;
-  document.getElementById('pf').innerHTML = sec.querySelector('.tf').innerHTML;
+  document.getElementById('pp-content').innerHTML = sec.querySelector('.tp').innerHTML;
+  document.getElementById('pe-content').innerHTML = sec.querySelector('.te').innerHTML;
+  document.getElementById('pf-content').innerHTML = sec.querySelector('.tf').innerHTML;
   document.getElementById('cp').textContent = sec.dataset.pub;
   document.getElementById('ce').textContent = sec.dataset.pend;
   document.getElementById('cf').textContent = sec.dataset.fin;
@@ -1064,6 +1071,107 @@ function clearFinFilters(tw) {
   });
   tw.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.remove('fin-hidden'); });
 }
+
+// ── EXPORTAR (Excel / PDF) ────────────────────────────────────────────
+function toggleExportMenu(id) {
+  document.querySelectorAll('.exp-menu').forEach(function(m) {
+    if (m.id !== id + '-expmenu') m.style.display = 'none';
+  });
+  var menu = document.getElementById(id + '-expmenu');
+  if (menu) menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
+}
+
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.exp-wrap')) {
+    document.querySelectorAll('.exp-menu').forEach(function(m) { m.style.display = 'none'; });
+  }
+});
+
+function getSelectedTalentName() {
+  var el = document.getElementById('dd-selected');
+  var name = el ? el.textContent.trim() : '';
+  return (!name || name === 'Seleccioná un talento...') ? '' : name;
+}
+
+// Junta filas visibles del panel activo (respeta el talento seleccionado y
+// cualquier filtro de la solapa Finanzas -filas marcadas fin-hidden se excluyen-).
+// En Publicados, si hay varios grupos por mes, se agrega una columna "Mes".
+function collectPanelData(panelId) {
+  var content = document.getElementById(panelId + '-content');
+  if (!content) return {header: [], rows: []};
+
+  var groups = content.querySelectorAll('.mg');
+  var header = [];
+  var rows = [];
+
+  if (groups.length) {
+    groups.forEach(function(g) {
+      var mtEl = g.querySelector('.mt');
+      var mes = mtEl ? (mtEl.childNodes[0].textContent || '').trim() : '';
+      var table = g.querySelector('table');
+      if (!table) return;
+      if (!header.length) {
+        header = ['Mes'];
+        table.querySelectorAll('thead th').forEach(function(th) { header.push(th.textContent.trim()); });
+      }
+      table.querySelectorAll('tbody tr').forEach(function(tr) {
+        if (tr.classList.contains('fin-hidden')) return;
+        var row = [mes];
+        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
+        rows.push(row);
+      });
+    });
+  } else {
+    var table = content.querySelector('table');
+    if (table) {
+      table.querySelectorAll('thead th').forEach(function(th) { header.push(th.textContent.trim()); });
+      table.querySelectorAll('tbody tr').forEach(function(tr) {
+        if (tr.classList.contains('fin-hidden')) return;
+        var row = [];
+        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
+        rows.push(row);
+      });
+    }
+  }
+  return {header: header, rows: rows};
+}
+
+function exportExcel(panelId, sheetName) {
+  var talent = getSelectedTalentName();
+  if (!talent) { alert('Seleccioná un talento primero.'); return; }
+  var data = collectPanelData(panelId);
+  if (!data.rows.length) { alert('No hay datos para exportar.'); return; }
+  if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel. Revisá tu conexión a internet.'); return; }
+  var aoa = [data.header].concat(data.rows);
+  var ws = XLSX.utils.aoa_to_sheet(aoa);
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName.substring(0, 31));
+  XLSX.writeFile(wb, talent + ' - ' + sheetName + '.xlsx');
+  toggleExportMenu(panelId);
+}
+
+function exportPDF(panelId, sheetName) {
+  var talent = getSelectedTalentName();
+  if (!talent) { alert('Seleccioná un talento primero.'); return; }
+  var data = collectPanelData(panelId);
+  if (!data.rows.length) { alert('No hay datos para exportar.'); return; }
+  if (typeof window.jspdf === 'undefined') { alert('No se pudo cargar el módulo de PDF. Revisá tu conexión a internet.'); return; }
+  var doc = new window.jspdf.jsPDF({orientation: 'landscape', unit: 'pt', format: 'a4'});
+  doc.setFontSize(13);
+  doc.text(talent + ' — ' + sheetName, 30, 28);
+  doc.setFontSize(8);
+  doc.text('Generado: ' + new Date().toLocaleString('es-AR'), 30, 42);
+  doc.autoTable({
+    head: [data.header],
+    body: data.rows,
+    startY: 52,
+    styles: {fontSize: 6.5, cellPadding: 3},
+    headStyles: {fillColor: [20, 22, 33]},
+    margin: {left: 30, right: 30}
+  });
+  doc.save(talent + ' - ' + sheetName + '.pdf');
+  toggleExportMenu(panelId);
+}
 """
 
 
@@ -1101,6 +1209,9 @@ def generar_html(talentos):
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Talentos ZAS — Finanzas</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <style>{CSS}</style>
 </head>
 <body>
@@ -1134,9 +1245,42 @@ def generar_html(talentos):
   <button class="tb" data-tab="f" onclick="st('f',this)">Finanzas <span class="tc" id="cf">—</span></button>
 </div>
 <div class="main">
-  <div class="panel active" id="pp"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
-  <div class="panel" id="pe"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
-  <div class="panel" id="pf"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
+  <div class="panel active" id="pp">
+    <div class="exp-bar">
+      <div class="exp-wrap">
+        <button class="exp-btn" onclick="toggleExportMenu('pp')">⬇ Exportar</button>
+        <div class="exp-menu" id="pp-expmenu">
+          <div class="exp-item" onclick="exportExcel('pp','Publicados')">📊 Excel (.xlsx)</div>
+          <div class="exp-item" onclick="exportPDF('pp','Publicados')">📄 PDF</div>
+        </div>
+      </div>
+    </div>
+    <div id="pp-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
+  </div>
+  <div class="panel" id="pe">
+    <div class="exp-bar">
+      <div class="exp-wrap">
+        <button class="exp-btn" onclick="toggleExportMenu('pe')">⬇ Exportar</button>
+        <div class="exp-menu" id="pe-expmenu">
+          <div class="exp-item" onclick="exportExcel('pe','Pendientes')">📊 Excel (.xlsx)</div>
+          <div class="exp-item" onclick="exportPDF('pe','Pendientes')">📄 PDF</div>
+        </div>
+      </div>
+    </div>
+    <div id="pe-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
+  </div>
+  <div class="panel" id="pf">
+    <div class="exp-bar">
+      <div class="exp-wrap">
+        <button class="exp-btn" onclick="toggleExportMenu('pf')">⬇ Exportar</button>
+        <div class="exp-menu" id="pf-expmenu">
+          <div class="exp-item" onclick="exportExcel('pf','Finanzas')">📊 Excel (.xlsx)</div>
+          <div class="exp-item" onclick="exportPDF('pf','Finanzas')">📄 PDF</div>
+        </div>
+      </div>
+    </div>
+    <div id="pf-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
+  </div>
 </div>
 <div style="display:none" id="data">{sections}</div>
 <script>{JS}
