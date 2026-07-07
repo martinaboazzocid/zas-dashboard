@@ -184,7 +184,8 @@ def bajar_datos():
                     "x_studio_tipo_de_contrato", "x_studio_nombre_de_la_campaa",
                     "x_studio_marca", "date_order", "partner_id",
                     "invoice_ids", "order_line",
-                    "x_studio_factura_o_boleta", "x_studio_selection_field_4kh_1it0ckuc4"],
+                    "x_studio_factura_o_boleta", "x_studio_selection_field_4kh_1it0ckuc4",
+                    "payment_term_id"],
         ))
 
     sale_orders = [
@@ -209,19 +210,25 @@ def bajar_datos():
             session,
             model="sale.order.line",
             domain=[["id", "in", sol_ids_all[i:i+200]]],
-            fields=["id", "order_id", "product_id", "task_id"],
+            fields=["id", "order_id", "product_id", "task_id", "price_subtotal"],
         )
         for line in lines:
+            prod_name = ""
             if line.get("product_id"):
                 prod_name = line["product_id"][1] if isinstance(line["product_id"], list) else ""
-                sol_map[line["id"]] = _extract_talent_from_product(prod_name)
+            sol_map[line["id"]] = {
+                "talent": _extract_talent_from_product(prod_name),
+                "amount": line.get("price_subtotal") or 0,
+            }
 
     task_talent_map = {}
+    task_amount_map = {}
     for t in subtareas:
         if t.get("sale_line_id"):
             sol_id = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"]
             if sol_id in sol_map:
-                task_talent_map[t["id"]] = sol_map[sol_id]
+                task_talent_map[t["id"]] = sol_map[sol_id]["talent"]
+                task_amount_map[t["id"]] = sol_map[sol_id]["amount"]
     for t in subtareas:
         if t["id"] not in task_talent_map:
             task_talent_map[t["id"]] = _extract_talent_from_task(t.get("name", ""))
@@ -284,7 +291,7 @@ def bajar_datos():
                     vendor_invoices_map[po["id"]].append(vinv)
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
 
-    return talent_names, subtareas, task_talent_map, so_map, client_invoices_map, po_map, vendor_invoices_map
+    return talent_names, subtareas, task_talent_map, task_amount_map, so_map, client_invoices_map, po_map, vendor_invoices_map
 
 
 def _normalizar_nombre(nombre):
@@ -402,7 +409,16 @@ def badge(cls, text):
     return f'<span class="badge {cls}">{text}</span>'
 
 
-def construir_datos(talent_names, subtareas, task_talent_map, so_map,
+def get_payment_term(so):
+    if not so:
+        return "—"
+    v = so.get("payment_term_id")
+    if not v or v is False:
+        return "—"
+    return v[1] if isinstance(v, (list, tuple)) else str(v)
+
+
+def construir_datos(talent_names, subtareas, task_talent_map, task_amount_map, so_map,
                     client_inv_map, po_map, vendor_inv_map):
     talent_tasks = defaultdict(list)
     for t in subtareas:
@@ -425,11 +441,12 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
             if not so:
                 continue
             so_ids_seen.add(so["id"])
+            amt = task_amount_map.get(t["id"])  # price_subtotal unitario de la línea
             fecha_pub = t.get("x_studio_fecha_de_publicacin")
             if fecha_pub and fecha_pub is not False:
-                published.append({"task": t, "so": so})
+                published.append({"task": t, "so": so, "amount": amt})
             else:
-                pending.append({"task": t, "so": so})
+                pending.append({"task": t, "so": so, "amount": amt})
 
         finance = []
         for so_id in so_ids_seen:
@@ -505,6 +522,7 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
                 "pct_talento": pct_talento,
                 "fact_boleta": fact_boleta,
                 "pais": pais_final(so),
+                "payment_term": get_payment_term(so),
             })
 
         finance.sort(key=lambda x: x["so"].get("name", ""))
@@ -526,6 +544,7 @@ def _render_fact_cobro_cell(f):
         return badge("bd", "—")
     fs = f["factura_status"]
     cs = f["cobro_status"]
+    venc = f.get("vencimiento")
 
     if fs == "pendiente_factura":
         fact_part  = badge("by", "Pendiente factura")
@@ -535,7 +554,8 @@ def _render_fact_cobro_cell(f):
         if cs == "cobrado":
             cobro_part = f'<span class="badge bg">{f["cobro_fecha"] or "Cobrado"}</span>'
         elif cs == "pendiente_cobro":
-            cobro_part = badge("by", "Pendiente cobro")
+            venc_txt = f" · vto. {venc}" if venc else ""
+            cobro_part = badge("by", f"Pendiente cobro{venc_txt}")
         else:
             cobro_part = badge("bd", "—")
     else:
@@ -577,7 +597,7 @@ def render_published(published, finance_by_so=None):
         gid  = f"mg-{mk}-{i}"
         tots = defaultdict(float)
         for it in items:
-            tots[get_currency(it["so"])] += it["so"].get("amount_untaxed") or 0
+            tots[get_currency(it["so"])] += it["amount"] if it.get("amount") is not None else (it["so"].get("amount_untaxed") or 0)
         tot_str = "  ·  ".join(f"{c} {fmt_num(v)}" for c, v in tots.items())
 
         rows = ""
@@ -586,13 +606,14 @@ def render_published(published, finance_by_so=None):
             son   = t["sale_order_id"][1] if isinstance(t["sale_order_id"], list) else str(t["sale_order_id"])
             pais  = pais_final(so)
             f_dat = fbs.get(so["name"])
+            neto_unit = it["amount"] if it.get("amount") is not None else so.get("amount_untaxed")
             rows += f"""<tr>
               <td><span class="num">{son}</span></td>
               <td><span class="tnc">{t.get("name","—")}</span></td>
               <td><span class="sm">{get_marca(so)}</span></td>
               <td><span class="sm">{get_campana(so)}</span></td>
               <td>{badge("bd", get_currency(so))}</td>
-              <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
+              <td class="amt">{fmt_num(neto_unit)}</td>
               <td><span class="dv">{fmt_date(t["x_studio_fecha_de_publicacin"]) or "—"}</span></td>
               <td><span class="pt">{pais or "—"}</span></td>
               <td>{_render_fact_cobro_cell(f_dat)}</td>
@@ -631,13 +652,14 @@ def render_pending(pending, finance_by_so=None):
         est_html = f'<span class="de">{fmt_date(est)}</span>' if (est and est is not False) else badge("bd", "Sin fecha")
         pais  = pais_final(so)
         f_dat = fbs.get(so["name"])
+        neto_unit = it["amount"] if it.get("amount") is not None else so.get("amount_untaxed")
         rows += f"""<tr>
           <td><span class="num">{son}</span></td>
           <td><span class="tnc">{t.get("name","—")}</span></td>
           <td><span class="sm">{get_marca(so)}</span></td>
           <td><span class="sm">{get_campana(so)}</span></td>
           <td>{badge("bd", get_currency(so))}</td>
-          <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
+          <td class="amt">{fmt_num(neto_unit)}</td>
           <td>{est_html}</td>
           <td><span class="pt">{pais or "—"}</span></td>
           <td>{_render_fact_cobro_cell(f_dat)}</td>
@@ -710,6 +732,7 @@ def render_finance(finance):
 
         # data-v para "Fact. cliente": almacenar el pct_fact numérico para filtro condicional
         fact_data_v = str(f["pct_fact"]) if fs not in ("pendiente_factura",) else "pendiente_factura"
+        payment_term = f["payment_term"]
 
         rows += f"""<tr>
           <td data-v="{so["name"]}"><span class="num">{so["name"]}</span></td>
@@ -726,6 +749,7 @@ def render_finance(finance):
           <td class="amt" data-v="{f["pct_talento"]}">{pct_h}</td>
           <td data-v="{f["v_status"] or ""}">{pago_h}</td>
           <td data-v="{pais_txt}">{pais_h}</td>
+          <td data-v="{payment_term}">{payment_term}</td>
         </tr>"""
 
     # ── MEJORA 1: filtro condicional para Fact. cliente ──────────────────────
@@ -779,7 +803,7 @@ def render_finance(finance):
         <th>N° Venta</th><th>Marca</th><th>Campaña</th><th>Moneda</th>
         <th class="r">Neto</th><th>Fact/Boleta</th><th>Fact. cliente</th><th>Vencimiento</th>
         <th>Cobro 100%</th><th class="r">Fact. proveedor</th>
-        <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th><th>País campaña</th>
+        <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th><th>País campaña</th><th>Plazo de pago</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
@@ -1300,11 +1324,11 @@ if __name__ == "__main__":
     print("  Dashboard Talentos ZAS")
     print("=" * 55)
     try:
-        talent_names, subtareas, task_talent_map, so_map, \
+        talent_names, subtareas, task_talent_map, task_amount_map, so_map, \
             client_inv_map, po_map, vendor_inv_map = bajar_datos()
 
         print("\nConstruyendo datos...")
-        talentos = construir_datos(talent_names, subtareas, task_talent_map,
+        talentos = construir_datos(talent_names, subtareas, task_talent_map, task_amount_map,
                                    so_map, client_inv_map, po_map, vendor_inv_map)
         print(f"  ✓ {len(talentos)} talentos con datos")
 
