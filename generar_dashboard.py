@@ -607,6 +607,7 @@ def render_published(published, finance_by_so=None):
             pais  = pais_final(so)
             f_dat = fbs.get(so["name"])
             neto_unit = it["amount"] if it.get("amount") is not None else so.get("amount_untaxed")
+            pt = f_dat["payment_term"] if f_dat else "—"
             rows += f"""<tr>
               <td><span class="num">{son}</span></td>
               <td><span class="tnc">{t.get("name","—")}</span></td>
@@ -618,6 +619,7 @@ def render_published(published, finance_by_so=None):
               <td><span class="pt">{pais or "—"}</span></td>
               <td>{_render_fact_cobro_cell(f_dat)}</td>
               <td>{_render_pago_talento_cell(f_dat)}</td>
+              <td><span class="sm">{pt}</span></td>
             </tr>"""
 
         html += f"""
@@ -630,7 +632,7 @@ def render_published(published, finance_by_so=None):
             <thead><tr>
               <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
               <th>Moneda</th><th class="r">Neto</th><th>Publicación</th><th>País campaña</th>
-              <th>Fact. / Cobro</th><th>Pago talento</th>
+              <th>Fact. / Cobro</th><th>Pago talento</th><th>Plazo de pago</th>
             </tr></thead>
             <tbody>{rows}</tbody>
           </table></div></div>
@@ -653,6 +655,7 @@ def render_pending(pending, finance_by_so=None):
         pais  = pais_final(so)
         f_dat = fbs.get(so["name"])
         neto_unit = it["amount"] if it.get("amount") is not None else so.get("amount_untaxed")
+        pt = f_dat["payment_term"] if f_dat else "—"
         rows += f"""<tr>
           <td><span class="num">{son}</span></td>
           <td><span class="tnc">{t.get("name","—")}</span></td>
@@ -664,13 +667,14 @@ def render_pending(pending, finance_by_so=None):
           <td><span class="pt">{pais or "—"}</span></td>
           <td>{_render_fact_cobro_cell(f_dat)}</td>
           <td>{_render_pago_talento_cell(f_dat)}</td>
+          <td><span class="sm">{pt}</span></td>
         </tr>"""
 
     return f"""<div class="tw"><table>
       <thead><tr>
         <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
         <th>Moneda</th><th class="r">Neto</th><th>Fecha estimada</th><th>País campaña</th>
-        <th>Fact. / Cobro</th><th>Pago talento</th>
+        <th>Fact. / Cobro</th><th>Pago talento</th><th>Plazo de pago</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
@@ -757,8 +761,31 @@ def render_finance(finance):
       <div class="fbar" id="fbar">
         <span class="flab">Filtrar:</span>
         <div class="fsel-wrap">
+          <label class="fsel-lbl">N° Venta</label>
+          <input class="fsel ftext" type="text" data-col="0" placeholder="Buscar..."
+                 oninput="applyFinFilter(this.closest('.tw'))">
+        </div>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">Marca</label>
+          <select class="fsel" data-col="1" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">Campaña</label>
+          <select class="fsel" data-col="2" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
           <label class="fsel-lbl">Moneda</label>
           <select class="fsel" data-col="3" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todas</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">Fact/Boleta</label>
+          <select class="fsel" data-col="5" onchange="applyFinFilter(this.closest('.tw'))">
             <option value="">Todas</option>
           </select>
         </div>
@@ -779,6 +806,12 @@ def render_finance(finance):
           </div>
         </div>
         <div class="fsel-wrap">
+          <label class="fsel-lbl">Vencimiento</label>
+          <select class="fsel" data-col="7" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todos</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
           <label class="fsel-lbl">Cobro</label>
           <select class="fsel" data-col="8" onchange="applyFinFilter(this.closest('.tw'))">
             <option value="">Todas</option>
@@ -793,6 +826,12 @@ def render_finance(finance):
         <div class="fsel-wrap">
           <label class="fsel-lbl">País campaña</label>
           <select class="fsel" data-col="13" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todos</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
+          <label class="fsel-lbl">Plazo de pago</label>
+          <select class="fsel" data-col="14" onchange="applyFinFilter(this.closest('.tw'))">
             <option value="">Todos</option>
           </select>
         </div>
@@ -911,6 +950,7 @@ tr:hover td{background:rgba(255,255,255,.015)}
 .fsel-wrap{display:flex;flex-direction:column;gap:3px}
 .fsel-lbl{font-size:10px;font-family:var(--mo);color:var(--di);letter-spacing:.5px}
 .fsel{background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:5px 10px;border-radius:6px;font-size:12px;font-family:var(--sa);outline:none;cursor:pointer;transition:.15s}
+.ftext{cursor:text;min-width:90px}
 .fsel:focus,.fsel:hover{border-color:var(--ac)}
 .fclr{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:5px 12px;border-radius:6px;font-size:11px;font-family:var(--mo);cursor:pointer;transition:.15s;align-self:flex-end}
 .fclr:hover{border-color:var(--rd);color:var(--rd)}
@@ -924,13 +964,39 @@ tr.fin-hidden{display:none}
 .fsel-num{width:60px;background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:5px 8px;border-radius:6px;font-size:12px;font-family:var(--mo);outline:none;transition:.15s;-moz-appearance:textfield}
 .fsel-num::-webkit-outer-spin-button,.fsel-num::-webkit-inner-spin-button{-webkit-appearance:none}
 .fsel-num:focus,.fsel-num:hover{border-color:var(--ac)}
-.exp-bar{display:flex;justify-content:flex-end;padding:10px 14px 0}
-.exp-wrap{position:relative}
-.exp-btn{background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 14px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.15s;display:flex;align-items:center;gap:6px}
-.exp-btn:hover{border-color:var(--ac);color:var(--ac)}
-.exp-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);background:var(--sf2);border:1px solid var(--br2);border-radius:8px;min-width:170px;z-index:20;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.4)}
-.exp-item{padding:10px 14px;font-size:12.5px;cursor:pointer;transition:.12s;white-space:nowrap}
-.exp-item:hover{background:var(--sf);color:var(--ac)}
+.exp-bar{display:flex;justify-content:flex-end;padding:12px 16px 0}
+.exp-btn{background:linear-gradient(135deg,rgba(77,255,195,.12),rgba(77,255,195,.06));border:1px solid rgba(77,255,195,.35);color:var(--ac);padding:8px 16px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:600;cursor:pointer;transition:.18s;display:flex;align-items:center;gap:7px;letter-spacing:.2px}
+.exp-btn:hover{background:linear-gradient(135deg,rgba(77,255,195,.22),rgba(77,255,195,.12));border-color:var(--ac);box-shadow:0 0 12px rgba(77,255,195,.15)}
+.exp-btn svg{opacity:.8}
+/* ── EXPORT MODAL ── */
+.exp-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
+.exp-overlay.open{display:flex}
+.exp-modal{background:var(--sf2);border:1px solid var(--br2);border-radius:14px;padding:28px;width:560px;max-width:94vw;box-shadow:0 24px 64px rgba(0,0,0,.6);animation:mfade .18s ease}
+@keyframes mfade{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
+.exp-modal-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
+.exp-modal-ttl{font-size:15px;font-weight:600;color:var(--tx)}
+.exp-modal-ttl span{color:var(--ac)}
+.exp-modal-close{background:transparent;border:none;color:var(--mu);font-size:18px;cursor:pointer;padding:2px 6px;border-radius:5px;line-height:1;transition:.12s}
+.exp-modal-close:hover{color:var(--rd);background:var(--rdb)}
+.exp-modal-sub{font-size:11px;font-family:var(--mo);color:var(--mu);letter-spacing:.4px;margin-bottom:16px}
+.exp-modal-ctrl{display:flex;gap:6px;margin-bottom:12px}
+.exp-ctrl-btn{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:4px 11px;border-radius:6px;font-size:11px;font-family:var(--mo);cursor:pointer;transition:.14s}
+.exp-ctrl-btn:hover{border-color:var(--ac);color:var(--ac)}
+.exp-cols-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;max-height:260px;overflow-y:auto;margin-bottom:20px;padding-right:2px}
+.exp-cols-grid::-webkit-scrollbar{width:4px}.exp-cols-grid::-webkit-scrollbar-thumb{background:var(--br2);border-radius:2px}
+.exp-col-lbl{display:flex;align-items:center;gap:9px;padding:8px 11px;background:var(--sf);border:1px solid var(--br);border-radius:7px;cursor:pointer;font-size:12px;color:var(--mu);transition:.14s;user-select:none}
+.exp-col-lbl:hover{border-color:rgba(77,255,195,.4);color:var(--tx)}
+.exp-col-lbl input[type=checkbox]{accent-color:var(--ac);width:14px;height:14px;cursor:pointer;flex-shrink:0}
+.exp-col-lbl.on{border-color:rgba(77,255,195,.3);color:var(--tx);background:rgba(77,255,195,.04)}
+.exp-modal-footer{display:flex;align-items:center;justify-content:space-between;padding-top:16px;border-top:1px solid var(--br)}
+.exp-footer-info{font-size:11px;font-family:var(--mo);color:var(--di)}
+.exp-footer-btns{display:flex;gap:8px}
+.exp-f-cancel{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:8px 16px;border-radius:8px;font-family:var(--sa);font-size:12.5px;cursor:pointer;transition:.14s}
+.exp-f-cancel:hover{border-color:var(--rd);color:var(--rd)}
+.exp-f-pdf{background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:8px 16px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.14s;display:flex;align-items:center;gap:6px}
+.exp-f-pdf:hover{border-color:var(--ac);color:var(--ac)}
+.exp-f-xlsx{background:linear-gradient(135deg,rgba(77,255,195,.15),rgba(77,255,195,.07));border:1px solid rgba(77,255,195,.4);color:var(--ac);padding:8px 18px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:600;cursor:pointer;transition:.14s;display:flex;align-items:center;gap:6px}
+.exp-f-xlsx:hover{background:linear-gradient(135deg,rgba(77,255,195,.25),rgba(77,255,195,.14));box-shadow:0 0 10px rgba(77,255,195,.2)}
 """
 
 JS = r"""
@@ -1002,7 +1068,7 @@ function tog(id) {
 
 // ── FILTROS FINANZAS ──────────────────────────────────────────────────
 function populateFinFilters(tw) {
-  tw.querySelectorAll('.fsel:not(.fsel-op)').forEach(function(sel) {
+  tw.querySelectorAll('.fsel:not(.fsel-op):not(.ftext)').forEach(function(sel) {
     var col = parseInt(sel.dataset.col);
     var vals = new Set();
     tw.querySelectorAll('tbody tr').forEach(function(tr) {
@@ -1032,9 +1098,15 @@ function onPctOpChange(sel) {
 }
 
 function applyFinFilter(tw) {
+  // Filtros de texto libre (contains, case-insensitive)
+  var textFilters = [];
+  tw.querySelectorAll('.ftext').forEach(function(inp) {
+    if (inp.value.trim()) textFilters.push({col: parseInt(inp.dataset.col), val: inp.value.trim().toLowerCase()});
+  });
+
   // Filtros de select normales (exacto)
   var normalFilters = [];
-  tw.querySelectorAll('.fsel:not(.fsel-op)').forEach(function(sel) {
+  tw.querySelectorAll('.fsel:not(.fsel-op):not(.ftext)').forEach(function(sel) {
     if (sel.value) normalFilters.push({col: parseInt(sel.dataset.col), val: sel.value});
   });
 
@@ -1052,20 +1124,25 @@ function applyFinFilter(tw) {
   }
 
   tw.querySelectorAll('tbody tr').forEach(function(tr) {
-    // Evaluar filtros normales
-    var show = normalFilters.every(function(f) {
+    // Texto libre
+    var show = textFilters.every(function(f) {
+      var td = tr.cells[f.col];
+      return td && (td.dataset.v || td.innerText || '').toLowerCase().indexOf(f.val) >= 0;
+    });
+
+    // Exacto
+    if (show) show = normalFilters.every(function(f) {
       var td = tr.cells[f.col];
       return td && (td.dataset.v || '') === f.val;
     });
 
-    // Evaluar filtro de porcentaje
+    // Porcentaje condicional
     if (show && pctFilter) {
-      var td = tr.cells[6]; // columna Fact. cliente
+      var td = tr.cells[6];
       var rawVal = td ? (td.dataset.v || '') : '';
       if (pctFilter.type === 'pendiente') {
         show = rawVal === 'pendiente_factura';
       } else {
-        // Es numérico: si la celda es "pendiente_factura" o "100" (string con 100%)
         var cellNum = (rawVal === '100' || rawVal === 'pendiente_factura')
           ? (rawVal === '100' ? 100 : NaN)
           : parseFloat(rawVal);
@@ -1089,6 +1166,7 @@ function applyFinFilter(tw) {
 
 function clearFinFilters(tw) {
   tw.querySelectorAll('.fsel').forEach(function(sel) { sel.value = ''; });
+  tw.querySelectorAll('.ftext').forEach(function(inp) { inp.value = ''; });
   tw.querySelectorAll('.fsel-num').forEach(function(inp) {
     inp.value = '';
     inp.style.display = 'none';
@@ -1096,38 +1174,19 @@ function clearFinFilters(tw) {
   tw.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.remove('fin-hidden'); });
 }
 
-// ── EXPORTAR (Excel / PDF) ────────────────────────────────────────────
-function toggleExportMenu(id) {
-  document.querySelectorAll('.exp-menu').forEach(function(m) {
-    if (m.id !== id + '-expmenu') m.style.display = 'none';
-  });
-  var menu = document.getElementById(id + '-expmenu');
-  if (menu) menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
-}
-
-document.addEventListener('click', function(e) {
-  if (!e.target.closest('.exp-wrap')) {
-    document.querySelectorAll('.exp-menu').forEach(function(m) { m.style.display = 'none'; });
-  }
-});
-
+// ── EXPORTAR (Excel / PDF) con modal de selección de columnas ───────
 function getSelectedTalentName() {
   var el = document.getElementById('dd-selected');
   var name = el ? el.textContent.trim() : '';
   return (!name || name === 'Seleccioná un talento...') ? '' : name;
 }
 
-// Junta filas visibles del panel activo (respeta el talento seleccionado y
-// cualquier filtro de la solapa Finanzas -filas marcadas fin-hidden se excluyen-).
-// En Publicados, si hay varios grupos por mes, se agrega una columna "Mes".
 function collectPanelData(panelId) {
   var content = document.getElementById(panelId + '-content');
   if (!content) return {header: [], rows: []};
-
   var groups = content.querySelectorAll('.mg');
   var header = [];
   var rows = [];
-
   if (groups.length) {
     groups.forEach(function(g) {
       var mtEl = g.querySelector('.mt');
@@ -1160,41 +1219,109 @@ function collectPanelData(panelId) {
   return {header: header, rows: rows};
 }
 
-function exportExcel(panelId, sheetName) {
+var _expCtx = {};
+
+function openExportModal(panelId, sheetName) {
   var talent = getSelectedTalentName();
   if (!talent) { alert('Seleccioná un talento primero.'); return; }
   var data = collectPanelData(panelId);
   if (!data.rows.length) { alert('No hay datos para exportar.'); return; }
-  if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel. Revisá tu conexión a internet.'); return; }
-  var aoa = [data.header].concat(data.rows);
-  var ws = XLSX.utils.aoa_to_sheet(aoa);
-  var wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, sheetName.substring(0, 31));
-  XLSX.writeFile(wb, talent + ' - ' + sheetName + '.xlsx');
-  toggleExportMenu(panelId);
+
+  _expCtx = {panelId: panelId, sheetName: sheetName, talent: talent, data: data};
+
+  // Render column checkboxes
+  var grid = document.getElementById('exp-cols-grid');
+  grid.innerHTML = '';
+  data.header.forEach(function(h, i) {
+    var lbl = document.createElement('label');
+    lbl.className = 'exp-col-lbl on';
+    lbl.innerHTML = '<input type="checkbox" value="' + i + '" checked> ' + (h || '—');
+    lbl.querySelector('input').addEventListener('change', function() {
+      lbl.classList.toggle('on', this.checked);
+      updateExpCount();
+    });
+    grid.appendChild(lbl);
+  });
+
+  document.getElementById('exp-modal-ttl-tab').textContent = sheetName;
+  updateExpCount();
+  document.getElementById('exp-overlay').classList.add('open');
 }
 
-function exportPDF(panelId, sheetName) {
-  var talent = getSelectedTalentName();
-  if (!talent) { alert('Seleccioná un talento primero.'); return; }
-  var data = collectPanelData(panelId);
-  if (!data.rows.length) { alert('No hay datos para exportar.'); return; }
-  if (typeof window.jspdf === 'undefined') { alert('No se pudo cargar el módulo de PDF. Revisá tu conexión a internet.'); return; }
-  var doc = new window.jspdf.jsPDF({orientation: 'landscape', unit: 'pt', format: 'a4'});
-  doc.setFontSize(13);
-  doc.text(talent + ' — ' + sheetName, 30, 28);
-  doc.setFontSize(8);
-  doc.text('Generado: ' + new Date().toLocaleString('es-AR'), 30, 42);
-  doc.autoTable({
-    head: [data.header],
-    body: data.rows,
-    startY: 52,
-    styles: {fontSize: 6.5, cellPadding: 3},
-    headStyles: {fillColor: [20, 22, 33]},
-    margin: {left: 30, right: 30}
+function closeExportModal() {
+  document.getElementById('exp-overlay').classList.remove('open');
+}
+
+function expSelAll(val) {
+  document.querySelectorAll('#exp-cols-grid input[type=checkbox]').forEach(function(cb) {
+    cb.checked = val;
+    cb.closest('.exp-col-lbl').classList.toggle('on', val);
   });
-  doc.save(talent + ' - ' + sheetName + '.pdf');
-  toggleExportMenu(panelId);
+  updateExpCount();
+}
+
+function updateExpCount() {
+  var n = document.querySelectorAll('#exp-cols-grid input[type=checkbox]:checked').length;
+  var total = document.querySelectorAll('#exp-cols-grid input[type=checkbox]').length;
+  document.getElementById('exp-col-count').textContent = n + ' de ' + total + ' columnas seleccionadas';
+}
+
+function getFilteredData() {
+  var data = _expCtx.data;
+  var idxs = Array.from(
+    document.querySelectorAll('#exp-cols-grid input[type=checkbox]:checked')
+  ).map(function(cb) { return parseInt(cb.value); });
+  if (!idxs.length) { alert('Seleccioná al menos una columna.'); return null; }
+  return {
+    header: idxs.map(function(i) { return data.header[i]; }),
+    rows: data.rows.map(function(row) { return idxs.map(function(i) { return row[i] || ''; }); })
+  };
+}
+
+function doExportXLSX() {
+  var d = getFilteredData();
+  if (!d) return;
+  if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel.'); return; }
+  var ws = XLSX.utils.aoa_to_sheet([d.header].concat(d.rows));
+  // Auto column widths
+  var wscols = d.header.map(function(h, i) {
+    var maxLen = Math.max(h.length, ...d.rows.map(function(r){ return (r[i]||'').length; }));
+    return {wch: Math.min(Math.max(maxLen + 2, 10), 40)};
+  });
+  ws['!cols'] = wscols;
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, _expCtx.sheetName.substring(0, 31));
+  XLSX.writeFile(wb, _expCtx.talent + ' - ' + _expCtx.sheetName + '.xlsx');
+  closeExportModal();
+}
+
+function doExportPDF() {
+  var d = getFilteredData();
+  if (!d) return;
+  if (typeof window.jspdf === 'undefined') { alert('No se pudo cargar el módulo de PDF.'); return; }
+  var doc = new window.jspdf.jsPDF({orientation: 'landscape', unit: 'pt', format: 'a4'});
+  doc.setFontSize(14);
+  doc.setTextColor(77, 255, 195);
+  doc.text(_expCtx.talent, 30, 30);
+  doc.setTextColor(228, 232, 244);
+  doc.setFontSize(11);
+  doc.text(_expCtx.sheetName, 30, 46);
+  doc.setFontSize(8);
+  doc.setTextColor(122, 129, 154);
+  doc.text('Generado: ' + new Date().toLocaleString('es-AR'), 30, 58);
+  doc.autoTable({
+    head: [d.header],
+    body: d.rows,
+    startY: 68,
+    styles: {fontSize: 7, cellPadding: 3.5, textColor: [228, 232, 244], lineColor: [37, 42, 58]},
+    headStyles: {fillColor: [19, 22, 31], textColor: [122, 129, 154], fontStyle: 'bold', fontSize: 7},
+    alternateRowStyles: {fillColor: [28, 32, 48]},
+    bodyStyles: {fillColor: [11, 13, 19]},
+    margin: {left: 28, right: 28},
+    tableLineColor: [37, 42, 58], tableLineWidth: 0.3
+  });
+  doc.save(_expCtx.talent + ' - ' + _expCtx.sheetName + '.pdf');
+  closeExportModal();
 }
 """
 
@@ -1271,39 +1398,58 @@ def generar_html(talentos):
 <div class="main">
   <div class="panel active" id="pp">
     <div class="exp-bar">
-      <div class="exp-wrap">
-        <button class="exp-btn" onclick="toggleExportMenu('pp')">⬇ Exportar</button>
-        <div class="exp-menu" id="pp-expmenu">
-          <div class="exp-item" onclick="exportExcel('pp','Publicados')">📊 Excel (.xlsx)</div>
-          <div class="exp-item" onclick="exportPDF('pp','Publicados')">📄 PDF</div>
-        </div>
-      </div>
+      <button class="exp-btn" onclick="openExportModal('pp','Publicados')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Exportar
+      </button>
     </div>
     <div id="pp-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
   </div>
   <div class="panel" id="pe">
     <div class="exp-bar">
-      <div class="exp-wrap">
-        <button class="exp-btn" onclick="toggleExportMenu('pe')">⬇ Exportar</button>
-        <div class="exp-menu" id="pe-expmenu">
-          <div class="exp-item" onclick="exportExcel('pe','Pendientes')">📊 Excel (.xlsx)</div>
-          <div class="exp-item" onclick="exportPDF('pe','Pendientes')">📄 PDF</div>
-        </div>
-      </div>
+      <button class="exp-btn" onclick="openExportModal('pe','Pendientes')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Exportar
+      </button>
     </div>
     <div id="pe-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
   </div>
   <div class="panel" id="pf">
     <div class="exp-bar">
-      <div class="exp-wrap">
-        <button class="exp-btn" onclick="toggleExportMenu('pf')">⬇ Exportar</button>
-        <div class="exp-menu" id="pf-expmenu">
-          <div class="exp-item" onclick="exportExcel('pf','Finanzas')">📊 Excel (.xlsx)</div>
-          <div class="exp-item" onclick="exportPDF('pf','Finanzas')">📄 PDF</div>
-        </div>
-      </div>
+      <button class="exp-btn" onclick="openExportModal('pf','Finanzas')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Exportar
+      </button>
     </div>
     <div id="pf-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
+  </div>
+</div>
+<div class="exp-overlay" id="exp-overlay" onclick="if(event.target===this)closeExportModal()">
+  <div class="exp-modal">
+    <div class="exp-modal-hdr">
+      <div class="exp-modal-ttl">Exportar — <span id="exp-modal-ttl-tab"></span></div>
+      <button class="exp-modal-close" onclick="closeExportModal()">✕</button>
+    </div>
+    <div class="exp-modal-sub">Seleccioná las columnas a incluir en el archivo</div>
+    <div class="exp-modal-ctrl">
+      <button class="exp-ctrl-btn" onclick="expSelAll(true)">✓ Todas</button>
+      <button class="exp-ctrl-btn" onclick="expSelAll(false)">✕ Ninguna</button>
+    </div>
+    <div class="exp-cols-grid" id="exp-cols-grid"></div>
+    <div class="exp-modal-footer">
+      <span class="exp-footer-info" id="exp-col-count"></span>
+      <div class="exp-footer-btns">
+        <button class="exp-f-cancel" onclick="closeExportModal()">Cancelar</button>
+        <button class="exp-f-pdf" onclick="doExportPDF()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          PDF
+        </button>
+        <button class="exp-f-xlsx" onclick="doExportXLSX()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12l2.5 3L14 9"/></svg>
+          Excel
+        </button>
+      </div>
+    </div>
   </div>
 </div>
 <div style="display:none" id="data">{sections}</div>
@@ -1349,4 +1495,3 @@ if __name__ == "__main__":
         print(f"\n✗ ERROR: {e}")
         import traceback
         traceback.print_exc()
-        raise SystemExit(1)
