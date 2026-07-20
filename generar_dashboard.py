@@ -184,8 +184,7 @@ def bajar_datos():
                     "x_studio_tipo_de_contrato", "x_studio_nombre_de_la_campaa",
                     "x_studio_marca", "date_order", "partner_id",
                     "invoice_ids", "order_line",
-                    "x_studio_factura_o_boleta", "x_studio_selection_field_4kh_1it0ckuc4",
-                    "payment_term_id"],
+                    "x_studio_factura_o_boleta", "x_studio_selection_field_4kh_1it0ckuc4"],
         ))
 
     sale_orders = [
@@ -210,25 +209,19 @@ def bajar_datos():
             session,
             model="sale.order.line",
             domain=[["id", "in", sol_ids_all[i:i+200]]],
-            fields=["id", "order_id", "product_id", "task_id", "price_subtotal"],
+            fields=["id", "order_id", "product_id", "task_id"],
         )
         for line in lines:
-            prod_name = ""
             if line.get("product_id"):
                 prod_name = line["product_id"][1] if isinstance(line["product_id"], list) else ""
-            sol_map[line["id"]] = {
-                "talent": _extract_talent_from_product(prod_name),
-                "amount": line.get("price_subtotal") or 0,
-            }
+                sol_map[line["id"]] = _extract_talent_from_product(prod_name)
 
     task_talent_map = {}
-    task_amount_map = {}
     for t in subtareas:
         if t.get("sale_line_id"):
             sol_id = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"]
             if sol_id in sol_map:
-                task_talent_map[t["id"]] = sol_map[sol_id]["talent"]
-                task_amount_map[t["id"]] = sol_map[sol_id]["amount"]
+                task_talent_map[t["id"]] = sol_map[sol_id]
     for t in subtareas:
         if t["id"] not in task_talent_map:
             task_talent_map[t["id"]] = _extract_talent_from_task(t.get("name", ""))
@@ -291,7 +284,7 @@ def bajar_datos():
                     vendor_invoices_map[po["id"]].append(vinv)
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
 
-    return talent_names, subtareas, task_talent_map, task_amount_map, so_map, client_invoices_map, po_map, vendor_invoices_map
+    return talent_names, subtareas, task_talent_map, so_map, client_invoices_map, po_map, vendor_invoices_map
 
 
 def _normalizar_nombre(nombre):
@@ -409,16 +402,7 @@ def badge(cls, text):
     return f'<span class="badge {cls}">{text}</span>'
 
 
-def get_payment_term(so):
-    if not so:
-        return "—"
-    v = so.get("payment_term_id")
-    if not v or v is False:
-        return "—"
-    return v[1] if isinstance(v, (list, tuple)) else str(v)
-
-
-def construir_datos(talent_names, subtareas, task_talent_map, task_amount_map, so_map,
+def construir_datos(talent_names, subtareas, task_talent_map, so_map,
                     client_inv_map, po_map, vendor_inv_map):
     talent_tasks = defaultdict(list)
     for t in subtareas:
@@ -441,12 +425,11 @@ def construir_datos(talent_names, subtareas, task_talent_map, task_amount_map, s
             if not so:
                 continue
             so_ids_seen.add(so["id"])
-            amt = task_amount_map.get(t["id"])  # price_subtotal unitario de la línea
             fecha_pub = t.get("x_studio_fecha_de_publicacin")
             if fecha_pub and fecha_pub is not False:
-                published.append({"task": t, "so": so, "amount": amt})
+                published.append({"task": t, "so": so})
             else:
-                pending.append({"task": t, "so": so, "amount": amt})
+                pending.append({"task": t, "so": so})
 
         finance = []
         for so_id in so_ids_seen:
@@ -522,7 +505,6 @@ def construir_datos(talent_names, subtareas, task_talent_map, task_amount_map, s
                 "pct_talento": pct_talento,
                 "fact_boleta": fact_boleta,
                 "pais": pais_final(so),
-                "payment_term": get_payment_term(so),
             })
 
         finance.sort(key=lambda x: x["so"].get("name", ""))
@@ -544,7 +526,6 @@ def _render_fact_cobro_cell(f):
         return badge("bd", "—")
     fs = f["factura_status"]
     cs = f["cobro_status"]
-    venc = f.get("vencimiento")
 
     if fs == "pendiente_factura":
         fact_part  = badge("by", "Pendiente factura")
@@ -554,8 +535,7 @@ def _render_fact_cobro_cell(f):
         if cs == "cobrado":
             cobro_part = f'<span class="badge bg">{f["cobro_fecha"] or "Cobrado"}</span>'
         elif cs == "pendiente_cobro":
-            venc_txt = f" · vto. {venc}" if venc else ""
-            cobro_part = badge("by", f"Pendiente cobro{venc_txt}")
+            cobro_part = badge("by", "Pendiente cobro")
         else:
             cobro_part = badge("bd", "—")
     else:
@@ -597,7 +577,7 @@ def render_published(published, finance_by_so=None):
         gid  = f"mg-{mk}-{i}"
         tots = defaultdict(float)
         for it in items:
-            tots[get_currency(it["so"])] += it["amount"] if it.get("amount") is not None else (it["so"].get("amount_untaxed") or 0)
+            tots[get_currency(it["so"])] += it["so"].get("amount_untaxed") or 0
         tot_str = "  ·  ".join(f"{c} {fmt_num(v)}" for c, v in tots.items())
 
         rows = ""
@@ -606,20 +586,17 @@ def render_published(published, finance_by_so=None):
             son   = t["sale_order_id"][1] if isinstance(t["sale_order_id"], list) else str(t["sale_order_id"])
             pais  = pais_final(so)
             f_dat = fbs.get(so["name"])
-            neto_unit = it["amount"] if it.get("amount") is not None else so.get("amount_untaxed")
-            pt = f_dat["payment_term"] if f_dat else "—"
             rows += f"""<tr>
               <td><span class="num">{son}</span></td>
               <td><span class="tnc">{t.get("name","—")}</span></td>
               <td><span class="sm">{get_marca(so)}</span></td>
               <td><span class="sm">{get_campana(so)}</span></td>
               <td>{badge("bd", get_currency(so))}</td>
-              <td class="amt">{fmt_num(neto_unit)}</td>
+              <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
               <td><span class="dv">{fmt_date(t["x_studio_fecha_de_publicacin"]) or "—"}</span></td>
               <td><span class="pt">{pais or "—"}</span></td>
               <td>{_render_fact_cobro_cell(f_dat)}</td>
               <td>{_render_pago_talento_cell(f_dat)}</td>
-              <td><span class="sm">{pt}</span></td>
             </tr>"""
 
         html += f"""
@@ -632,7 +609,7 @@ def render_published(published, finance_by_so=None):
             <thead><tr>
               <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
               <th>Moneda</th><th class="r">Neto</th><th>Publicación</th><th>País campaña</th>
-              <th>Fact. / Cobro</th><th>Pago talento</th><th>Plazo de pago</th>
+              <th>Fact. / Cobro</th><th>Pago talento</th>
             </tr></thead>
             <tbody>{rows}</tbody>
           </table></div></div>
@@ -654,27 +631,24 @@ def render_pending(pending, finance_by_so=None):
         est_html = f'<span class="de">{fmt_date(est)}</span>' if (est and est is not False) else badge("bd", "Sin fecha")
         pais  = pais_final(so)
         f_dat = fbs.get(so["name"])
-        neto_unit = it["amount"] if it.get("amount") is not None else so.get("amount_untaxed")
-        pt = f_dat["payment_term"] if f_dat else "—"
         rows += f"""<tr>
           <td><span class="num">{son}</span></td>
           <td><span class="tnc">{t.get("name","—")}</span></td>
           <td><span class="sm">{get_marca(so)}</span></td>
           <td><span class="sm">{get_campana(so)}</span></td>
           <td>{badge("bd", get_currency(so))}</td>
-          <td class="amt">{fmt_num(neto_unit)}</td>
+          <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
           <td>{est_html}</td>
           <td><span class="pt">{pais or "—"}</span></td>
           <td>{_render_fact_cobro_cell(f_dat)}</td>
           <td>{_render_pago_talento_cell(f_dat)}</td>
-          <td><span class="sm">{pt}</span></td>
         </tr>"""
 
     return f"""<div class="tw"><table>
       <thead><tr>
         <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
         <th>Moneda</th><th class="r">Neto</th><th>Fecha estimada</th><th>País campaña</th>
-        <th>Fact. / Cobro</th><th>Pago talento</th><th>Plazo de pago</th>
+        <th>Fact. / Cobro</th><th>Pago talento</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
@@ -736,7 +710,6 @@ def render_finance(finance):
 
         # data-v para "Fact. cliente": almacenar el pct_fact numérico para filtro condicional
         fact_data_v = str(f["pct_fact"]) if fs not in ("pendiente_factura",) else "pendiente_factura"
-        payment_term = f["payment_term"]
 
         rows += f"""<tr>
           <td data-v="{so["name"]}"><span class="num">{so["name"]}</span></td>
@@ -753,7 +726,6 @@ def render_finance(finance):
           <td class="amt" data-v="{f["pct_talento"]}">{pct_h}</td>
           <td data-v="{f["v_status"] or ""}">{pago_h}</td>
           <td data-v="{pais_txt}">{pais_h}</td>
-          <td data-v="{payment_term}">{payment_term}</td>
         </tr>"""
 
     # ── MEJORA 1: filtro condicional para Fact. cliente ──────────────────────
@@ -761,31 +733,8 @@ def render_finance(finance):
       <div class="fbar" id="fbar">
         <span class="flab">Filtrar:</span>
         <div class="fsel-wrap">
-          <label class="fsel-lbl">N° Venta</label>
-          <input class="fsel ftext" type="text" data-col="0" placeholder="Buscar..."
-                 oninput="applyFinFilter(this.closest('.tw'))">
-        </div>
-        <div class="fsel-wrap">
-          <label class="fsel-lbl">Marca</label>
-          <select class="fsel" data-col="1" onchange="applyFinFilter(this.closest('.tw'))">
-            <option value="">Todas</option>
-          </select>
-        </div>
-        <div class="fsel-wrap">
-          <label class="fsel-lbl">Campaña</label>
-          <select class="fsel" data-col="2" onchange="applyFinFilter(this.closest('.tw'))">
-            <option value="">Todas</option>
-          </select>
-        </div>
-        <div class="fsel-wrap">
           <label class="fsel-lbl">Moneda</label>
           <select class="fsel" data-col="3" onchange="applyFinFilter(this.closest('.tw'))">
-            <option value="">Todas</option>
-          </select>
-        </div>
-        <div class="fsel-wrap">
-          <label class="fsel-lbl">Fact/Boleta</label>
-          <select class="fsel" data-col="5" onchange="applyFinFilter(this.closest('.tw'))">
             <option value="">Todas</option>
           </select>
         </div>
@@ -806,12 +755,6 @@ def render_finance(finance):
           </div>
         </div>
         <div class="fsel-wrap">
-          <label class="fsel-lbl">Vencimiento</label>
-          <select class="fsel" data-col="7" onchange="applyFinFilter(this.closest('.tw'))">
-            <option value="">Todos</option>
-          </select>
-        </div>
-        <div class="fsel-wrap">
           <label class="fsel-lbl">Cobro</label>
           <select class="fsel" data-col="8" onchange="applyFinFilter(this.closest('.tw'))">
             <option value="">Todas</option>
@@ -829,12 +772,6 @@ def render_finance(finance):
             <option value="">Todos</option>
           </select>
         </div>
-        <div class="fsel-wrap">
-          <label class="fsel-lbl">Plazo de pago</label>
-          <select class="fsel" data-col="14" onchange="applyFinFilter(this.closest('.tw'))">
-            <option value="">Todos</option>
-          </select>
-        </div>
         <button class="fclr" onclick="clearFinFilters(this.closest('.tw'))">✕ Limpiar</button>
       </div>
       <table>
@@ -842,7 +779,7 @@ def render_finance(finance):
         <th>N° Venta</th><th>Marca</th><th>Campaña</th><th>Moneda</th>
         <th class="r">Neto</th><th>Fact/Boleta</th><th>Fact. cliente</th><th>Vencimiento</th>
         <th>Cobro 100%</th><th class="r">Fact. proveedor</th>
-        <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th><th>País campaña</th><th>Plazo de pago</th>
+        <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th><th>País campaña</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
@@ -950,7 +887,6 @@ tr:hover td{background:rgba(255,255,255,.015)}
 .fsel-wrap{display:flex;flex-direction:column;gap:3px}
 .fsel-lbl{font-size:10px;font-family:var(--mo);color:var(--di);letter-spacing:.5px}
 .fsel{background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:5px 10px;border-radius:6px;font-size:12px;font-family:var(--sa);outline:none;cursor:pointer;transition:.15s}
-.ftext{cursor:text;min-width:90px}
 .fsel:focus,.fsel:hover{border-color:var(--ac)}
 .fclr{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:5px 12px;border-radius:6px;font-size:11px;font-family:var(--mo);cursor:pointer;transition:.15s;align-self:flex-end}
 .fclr:hover{border-color:var(--rd);color:var(--rd)}
@@ -964,39 +900,33 @@ tr.fin-hidden{display:none}
 .fsel-num{width:60px;background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:5px 8px;border-radius:6px;font-size:12px;font-family:var(--mo);outline:none;transition:.15s;-moz-appearance:textfield}
 .fsel-num::-webkit-outer-spin-button,.fsel-num::-webkit-inner-spin-button{-webkit-appearance:none}
 .fsel-num:focus,.fsel-num:hover{border-color:var(--ac)}
-.exp-bar{display:flex;justify-content:flex-end;padding:12px 16px 0}
-.exp-btn{background:linear-gradient(135deg,rgba(77,255,195,.12),rgba(77,255,195,.06));border:1px solid rgba(77,255,195,.35);color:var(--ac);padding:8px 16px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:600;cursor:pointer;transition:.18s;display:flex;align-items:center;gap:7px;letter-spacing:.2px}
-.exp-btn:hover{background:linear-gradient(135deg,rgba(77,255,195,.22),rgba(77,255,195,.12));border-color:var(--ac);box-shadow:0 0 12px rgba(77,255,195,.15)}
-.exp-btn svg{opacity:.8}
-/* ── EXPORT MODAL ── */
-.exp-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;align-items:center;justify-content:center;backdrop-filter:blur(3px)}
-.exp-overlay.open{display:flex}
-.exp-modal{background:var(--sf2);border:1px solid var(--br2);border-radius:14px;padding:28px;width:560px;max-width:94vw;box-shadow:0 24px 64px rgba(0,0,0,.6);animation:mfade .18s ease}
-@keyframes mfade{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
-.exp-modal-hdr{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px}
-.exp-modal-ttl{font-size:15px;font-weight:600;color:var(--tx)}
-.exp-modal-ttl span{color:var(--ac)}
-.exp-modal-close{background:transparent;border:none;color:var(--mu);font-size:18px;cursor:pointer;padding:2px 6px;border-radius:5px;line-height:1;transition:.12s}
-.exp-modal-close:hover{color:var(--rd);background:var(--rdb)}
-.exp-modal-sub{font-size:11px;font-family:var(--mo);color:var(--mu);letter-spacing:.4px;margin-bottom:16px}
-.exp-modal-ctrl{display:flex;gap:6px;margin-bottom:12px}
-.exp-ctrl-btn{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:4px 11px;border-radius:6px;font-size:11px;font-family:var(--mo);cursor:pointer;transition:.14s}
-.exp-ctrl-btn:hover{border-color:var(--ac);color:var(--ac)}
-.exp-cols-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;max-height:260px;overflow-y:auto;margin-bottom:20px;padding-right:2px}
-.exp-cols-grid::-webkit-scrollbar{width:4px}.exp-cols-grid::-webkit-scrollbar-thumb{background:var(--br2);border-radius:2px}
-.exp-col-lbl{display:flex;align-items:center;gap:9px;padding:8px 11px;background:var(--sf);border:1px solid var(--br);border-radius:7px;cursor:pointer;font-size:12px;color:var(--mu);transition:.14s;user-select:none}
-.exp-col-lbl:hover{border-color:rgba(77,255,195,.4);color:var(--tx)}
-.exp-col-lbl input[type=checkbox]{accent-color:var(--ac);width:14px;height:14px;cursor:pointer;flex-shrink:0}
-.exp-col-lbl.on{border-color:rgba(77,255,195,.3);color:var(--tx);background:rgba(77,255,195,.04)}
-.exp-modal-footer{display:flex;align-items:center;justify-content:space-between;padding-top:16px;border-top:1px solid var(--br)}
-.exp-footer-info{font-size:11px;font-family:var(--mo);color:var(--di)}
-.exp-footer-btns{display:flex;gap:8px}
-.exp-f-cancel{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:8px 16px;border-radius:8px;font-family:var(--sa);font-size:12.5px;cursor:pointer;transition:.14s}
-.exp-f-cancel:hover{border-color:var(--rd);color:var(--rd)}
-.exp-f-pdf{background:var(--sf);border:1px solid var(--br2);color:var(--tx);padding:8px 16px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.14s;display:flex;align-items:center;gap:6px}
-.exp-f-pdf:hover{border-color:var(--ac);color:var(--ac)}
-.exp-f-xlsx{background:linear-gradient(135deg,rgba(77,255,195,.15),rgba(77,255,195,.07));border:1px solid rgba(77,255,195,.4);color:var(--ac);padding:8px 18px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:600;cursor:pointer;transition:.14s;display:flex;align-items:center;gap:6px}
-.exp-f-xlsx:hover{background:linear-gradient(135deg,rgba(77,255,195,.25),rgba(77,255,195,.14));box-shadow:0 0 10px rgba(77,255,195,.2)}
+.exp-bar{display:flex;justify-content:flex-end;padding:10px 14px 0}
+.exp-wrap{position:relative}
+.exp-btn{background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 14px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.15s;display:flex;align-items:center;gap:6px}
+.exp-btn:hover{border-color:var(--ac);color:var(--ac)}
+.exp-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);background:var(--sf2);border:1px solid var(--br2);border-radius:8px;min-width:170px;z-index:20;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.exp-item{padding:10px 14px;font-size:12.5px;cursor:pointer;transition:.12s;white-space:nowrap}
+.exp-item:hover{background:var(--sf);color:var(--ac)}
+
+/* ── EXPORTAR MASIVO ── */
+.bulk-btn{background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 16px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
+.bulk-btn:hover{border-color:var(--ac);color:var(--ac)}
+.bm-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center}
+.bm-box{background:var(--sf);border:1px solid var(--br2);border-radius:14px;padding:28px;width:580px;max-width:95vw;max-height:88vh;overflow:auto;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.bm-title{font-size:14px;font-weight:600;color:var(--tx);letter-spacing:.3px}
+.bm-section-label{font-size:10px;font-family:var(--mo);letter-spacing:.7px;text-transform:uppercase;color:var(--mu);margin-bottom:10px}
+.bm-talent-list{max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:3px;border:1px solid var(--br);border-radius:8px;padding:8px}
+.bm-cb{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:5px;font-size:12.5px;color:var(--tx);cursor:pointer;transition:.1s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bm-cb:hover{background:var(--sf2)}
+.bm-cb input[type=checkbox]{accent-color:var(--ac);width:14px;height:14px;flex-shrink:0;cursor:pointer}
+.bm-small-btn{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:4px 10px;border-radius:6px;font-size:11px;font-family:var(--mo);cursor:pointer;transition:.15s}
+.bm-small-btn:hover{border-color:var(--ac);color:var(--ac)}
+.bm-action-btn{padding:9px 20px;border-radius:8px;font-family:var(--sa);font-size:13px;font-weight:500;cursor:pointer;transition:.15s;border:1px solid var(--br2);background:var(--sf2);color:var(--tx)}
+.bm-action-btn:hover{border-color:var(--ac);color:var(--ac)}
+.bm-action-btn.primary{background:var(--ac);color:#000;border-color:var(--ac)}
+.bm-action-btn.primary:hover{opacity:.85}
+.bm-search{width:100%;background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 10px;border-radius:6px;font-size:12px;font-family:var(--sa);outline:none;box-sizing:border-box;margin-bottom:8px}
+.bm-search:focus{border-color:var(--ac)}
 """
 
 JS = r"""
@@ -1068,7 +998,7 @@ function tog(id) {
 
 // ── FILTROS FINANZAS ──────────────────────────────────────────────────
 function populateFinFilters(tw) {
-  tw.querySelectorAll('.fsel:not(.fsel-op):not(.ftext)').forEach(function(sel) {
+  tw.querySelectorAll('.fsel:not(.fsel-op)').forEach(function(sel) {
     var col = parseInt(sel.dataset.col);
     var vals = new Set();
     tw.querySelectorAll('tbody tr').forEach(function(tr) {
@@ -1098,15 +1028,9 @@ function onPctOpChange(sel) {
 }
 
 function applyFinFilter(tw) {
-  // Filtros de texto libre (contains, case-insensitive)
-  var textFilters = [];
-  tw.querySelectorAll('.ftext').forEach(function(inp) {
-    if (inp.value.trim()) textFilters.push({col: parseInt(inp.dataset.col), val: inp.value.trim().toLowerCase()});
-  });
-
   // Filtros de select normales (exacto)
   var normalFilters = [];
-  tw.querySelectorAll('.fsel:not(.fsel-op):not(.ftext)').forEach(function(sel) {
+  tw.querySelectorAll('.fsel:not(.fsel-op)').forEach(function(sel) {
     if (sel.value) normalFilters.push({col: parseInt(sel.dataset.col), val: sel.value});
   });
 
@@ -1124,25 +1048,20 @@ function applyFinFilter(tw) {
   }
 
   tw.querySelectorAll('tbody tr').forEach(function(tr) {
-    // Texto libre
-    var show = textFilters.every(function(f) {
-      var td = tr.cells[f.col];
-      return td && (td.dataset.v || td.innerText || '').toLowerCase().indexOf(f.val) >= 0;
-    });
-
-    // Exacto
-    if (show) show = normalFilters.every(function(f) {
+    // Evaluar filtros normales
+    var show = normalFilters.every(function(f) {
       var td = tr.cells[f.col];
       return td && (td.dataset.v || '') === f.val;
     });
 
-    // Porcentaje condicional
+    // Evaluar filtro de porcentaje
     if (show && pctFilter) {
-      var td = tr.cells[6];
+      var td = tr.cells[6]; // columna Fact. cliente
       var rawVal = td ? (td.dataset.v || '') : '';
       if (pctFilter.type === 'pendiente') {
         show = rawVal === 'pendiente_factura';
       } else {
+        // Es numérico: si la celda es "pendiente_factura" o "100" (string con 100%)
         var cellNum = (rawVal === '100' || rawVal === 'pendiente_factura')
           ? (rawVal === '100' ? 100 : NaN)
           : parseFloat(rawVal);
@@ -1166,7 +1085,6 @@ function applyFinFilter(tw) {
 
 function clearFinFilters(tw) {
   tw.querySelectorAll('.fsel').forEach(function(sel) { sel.value = ''; });
-  tw.querySelectorAll('.ftext').forEach(function(inp) { inp.value = ''; });
   tw.querySelectorAll('.fsel-num').forEach(function(inp) {
     inp.value = '';
     inp.style.display = 'none';
@@ -1174,19 +1092,38 @@ function clearFinFilters(tw) {
   tw.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.remove('fin-hidden'); });
 }
 
-// ── EXPORTAR (Excel / PDF) con modal de selección de columnas ───────
+// ── EXPORTAR (Excel / PDF) ────────────────────────────────────────────
+function toggleExportMenu(id) {
+  document.querySelectorAll('.exp-menu').forEach(function(m) {
+    if (m.id !== id + '-expmenu') m.style.display = 'none';
+  });
+  var menu = document.getElementById(id + '-expmenu');
+  if (menu) menu.style.display = (menu.style.display === 'block') ? 'none' : 'block';
+}
+
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.exp-wrap')) {
+    document.querySelectorAll('.exp-menu').forEach(function(m) { m.style.display = 'none'; });
+  }
+});
+
 function getSelectedTalentName() {
   var el = document.getElementById('dd-selected');
   var name = el ? el.textContent.trim() : '';
   return (!name || name === 'Seleccioná un talento...') ? '' : name;
 }
 
+// Junta filas visibles del panel activo (respeta el talento seleccionado y
+// cualquier filtro de la solapa Finanzas -filas marcadas fin-hidden se excluyen-).
+// En Publicados, si hay varios grupos por mes, se agrega una columna "Mes".
 function collectPanelData(panelId) {
   var content = document.getElementById(panelId + '-content');
   if (!content) return {header: [], rows: []};
+
   var groups = content.querySelectorAll('.mg');
   var header = [];
   var rows = [];
+
   if (groups.length) {
     groups.forEach(function(g) {
       var mtEl = g.querySelector('.mt');
@@ -1219,110 +1156,205 @@ function collectPanelData(panelId) {
   return {header: header, rows: rows};
 }
 
-var _expCtx = {};
-
-function openExportModal(panelId, sheetName) {
+function exportExcel(panelId, sheetName) {
   var talent = getSelectedTalentName();
   if (!talent) { alert('Seleccioná un talento primero.'); return; }
   var data = collectPanelData(panelId);
   if (!data.rows.length) { alert('No hay datos para exportar.'); return; }
-
-  _expCtx = {panelId: panelId, sheetName: sheetName, talent: talent, data: data};
-
-  // Render column checkboxes
-  var grid = document.getElementById('exp-cols-grid');
-  grid.innerHTML = '';
-  data.header.forEach(function(h, i) {
-    var lbl = document.createElement('label');
-    lbl.className = 'exp-col-lbl on';
-    lbl.innerHTML = '<input type="checkbox" value="' + i + '" checked> ' + (h || '—');
-    lbl.querySelector('input').addEventListener('change', function() {
-      lbl.classList.toggle('on', this.checked);
-      updateExpCount();
-    });
-    grid.appendChild(lbl);
-  });
-
-  document.getElementById('exp-modal-ttl-tab').textContent = sheetName;
-  updateExpCount();
-  document.getElementById('exp-overlay').classList.add('open');
-}
-
-function closeExportModal() {
-  document.getElementById('exp-overlay').classList.remove('open');
-}
-
-function expSelAll(val) {
-  document.querySelectorAll('#exp-cols-grid input[type=checkbox]').forEach(function(cb) {
-    cb.checked = val;
-    cb.closest('.exp-col-lbl').classList.toggle('on', val);
-  });
-  updateExpCount();
-}
-
-function updateExpCount() {
-  var n = document.querySelectorAll('#exp-cols-grid input[type=checkbox]:checked').length;
-  var total = document.querySelectorAll('#exp-cols-grid input[type=checkbox]').length;
-  document.getElementById('exp-col-count').textContent = n + ' de ' + total + ' columnas seleccionadas';
-}
-
-function getFilteredData() {
-  var data = _expCtx.data;
-  var idxs = Array.from(
-    document.querySelectorAll('#exp-cols-grid input[type=checkbox]:checked')
-  ).map(function(cb) { return parseInt(cb.value); });
-  if (!idxs.length) { alert('Seleccioná al menos una columna.'); return null; }
-  return {
-    header: idxs.map(function(i) { return data.header[i]; }),
-    rows: data.rows.map(function(row) { return idxs.map(function(i) { return row[i] || ''; }); })
-  };
-}
-
-function doExportXLSX() {
-  var d = getFilteredData();
-  if (!d) return;
-  if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel.'); return; }
-  var ws = XLSX.utils.aoa_to_sheet([d.header].concat(d.rows));
-  // Auto column widths
-  var wscols = d.header.map(function(h, i) {
-    var maxLen = Math.max(h.length, ...d.rows.map(function(r){ return (r[i]||'').length; }));
-    return {wch: Math.min(Math.max(maxLen + 2, 10), 40)};
-  });
-  ws['!cols'] = wscols;
+  if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel. Revisá tu conexión a internet.'); return; }
+  var aoa = [data.header].concat(data.rows);
+  var ws = XLSX.utils.aoa_to_sheet(aoa);
   var wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, _expCtx.sheetName.substring(0, 31));
-  XLSX.writeFile(wb, _expCtx.talent + ' - ' + _expCtx.sheetName + '.xlsx');
-  closeExportModal();
+  XLSX.utils.book_append_sheet(wb, ws, sheetName.substring(0, 31));
+  XLSX.writeFile(wb, talent + ' - ' + sheetName + '.xlsx');
+  toggleExportMenu(panelId);
 }
 
-function doExportPDF() {
-  var d = getFilteredData();
-  if (!d) return;
-  if (typeof window.jspdf === 'undefined') { alert('No se pudo cargar el módulo de PDF.'); return; }
+function exportPDF(panelId, sheetName) {
+  var talent = getSelectedTalentName();
+  if (!talent) { alert('Seleccioná un talento primero.'); return; }
+  var data = collectPanelData(panelId);
+  if (!data.rows.length) { alert('No hay datos para exportar.'); return; }
+  if (typeof window.jspdf === 'undefined') { alert('No se pudo cargar el módulo de PDF. Revisá tu conexión a internet.'); return; }
   var doc = new window.jspdf.jsPDF({orientation: 'landscape', unit: 'pt', format: 'a4'});
-  doc.setFontSize(14);
-  doc.setTextColor(77, 255, 195);
-  doc.text(_expCtx.talent, 30, 30);
-  doc.setTextColor(228, 232, 244);
-  doc.setFontSize(11);
-  doc.text(_expCtx.sheetName, 30, 46);
+  doc.setFontSize(13);
+  doc.text(talent + ' — ' + sheetName, 30, 28);
   doc.setFontSize(8);
-  doc.setTextColor(122, 129, 154);
-  doc.text('Generado: ' + new Date().toLocaleString('es-AR'), 30, 58);
+  doc.text('Generado: ' + new Date().toLocaleString('es-AR'), 30, 42);
   doc.autoTable({
-    head: [d.header],
-    body: d.rows,
-    startY: 68,
-    styles: {fontSize: 7, cellPadding: 3.5, textColor: [228, 232, 244], lineColor: [37, 42, 58]},
-    headStyles: {fillColor: [19, 22, 31], textColor: [122, 129, 154], fontStyle: 'bold', fontSize: 7},
-    alternateRowStyles: {fillColor: [28, 32, 48]},
-    bodyStyles: {fillColor: [11, 13, 19]},
-    margin: {left: 28, right: 28},
-    tableLineColor: [37, 42, 58], tableLineWidth: 0.3
+    head: [data.header],
+    body: data.rows,
+    startY: 52,
+    styles: {fontSize: 6.5, cellPadding: 3},
+    headStyles: {fillColor: [20, 22, 33]},
+    margin: {left: 30, right: 30}
   });
-  doc.save(_expCtx.talent + ' - ' + _expCtx.sheetName + '.pdf');
-  closeExportModal();
+  doc.save(talent + ' - ' + sheetName + '.pdf');
+  toggleExportMenu(panelId);
 }
+
+
+// ── EXPORTAR MASIVO ──────────────────────────────────────────────
+var _BULK_TAB_MAP = [
+  {cls: 'tp', name: 'Publicados'},
+  {cls: 'te', name: 'Pendientes'},
+  {cls: 'tf', name: 'Finanzas'}
+];
+
+function openBulkModal() {
+  var talents = Array.from(document.querySelectorAll('#data .td'))
+    .map(function(el) { return el.dataset.t; })
+    .sort(function(a,b) { return a.localeCompare(b,'es'); });
+  var html = talents.map(function(t) {
+    var esc = t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return '<label class="bm-cb"><input type="checkbox" class="bm-talent-cb" value="' + esc + '" checked> ' + esc + '</label>';
+  }).join('');
+  document.getElementById('bm-talent-list').innerHTML = html;
+  document.getElementById('bulk-modal').style.display = 'flex';
+}
+
+function closeBulkModal() {
+  document.getElementById('bulk-modal').style.display = 'none';
+}
+
+function bmSelectAll(checked) {
+  document.querySelectorAll('.bm-talent-cb').forEach(function(cb) { cb.checked = checked; });
+}
+
+function bmFilterTalents(q) {
+  document.querySelectorAll('.bm-talent-cb').forEach(function(cb) {
+    var label = cb.closest('label');
+    if (label) label.style.display = cb.value.toLowerCase().indexOf(q.toLowerCase()) >= 0 ? '' : 'none';
+  });
+}
+
+function _bmGetTalents() {
+  return Array.from(document.querySelectorAll('.bm-talent-cb:checked')).map(function(cb) { return cb.value; });
+}
+
+function _bmGetTabs() {
+  return Array.from(document.querySelectorAll('.bm-tab-cb:checked')).map(function(cb) { return cb.value; });
+}
+
+function _bmCollectData(talentName, panelCls) {
+  var esc = talentName.replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  var sec = document.querySelector('#data .td[data-t="' + esc + '"]');
+  if (!sec) return {header: [], rows: []};
+  var content = sec.querySelector('.' + panelCls);
+  if (!content) return {header: [], rows: []};
+
+  var groups = content.querySelectorAll('.mg');
+  var header = [], rows = [];
+
+  if (groups.length) {
+    groups.forEach(function(g) {
+      var mtEl = g.querySelector('.mt');
+      var mes = mtEl ? (mtEl.childNodes[0].textContent || '').trim() : '';
+      var table = g.querySelector('table');
+      if (!table) return;
+      if (!header.length) {
+        header = ['Mes'];
+        table.querySelectorAll('thead th').forEach(function(th) { header.push(th.textContent.trim()); });
+      }
+      table.querySelectorAll('tbody tr').forEach(function(tr) {
+        if (tr.classList.contains('fin-hidden')) return;
+        var row = [mes];
+        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
+        rows.push(row);
+      });
+    });
+  } else {
+    var table = content.querySelector('table');
+    if (table) {
+      table.querySelectorAll('thead th').forEach(function(th) { header.push(th.textContent.trim()); });
+      table.querySelectorAll('tbody tr').forEach(function(tr) {
+        if (tr.classList.contains('fin-hidden')) return;
+        var row = [];
+        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
+        rows.push(row);
+      });
+    }
+  }
+  return {header: header, rows: rows};
+}
+
+function bulkExportExcel() {
+  var talents = _bmGetTalents();
+  var tabs    = _bmGetTabs();
+  if (!talents.length || !tabs.length) { alert('Seleccioná al menos un talento y una solapa.'); return; }
+  if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel. Revisá tu conexión a internet.'); return; }
+
+  var wb = XLSX.utils.book_new();
+  var sheetCount = 0;
+
+  talents.forEach(function(talent) {
+    tabs.forEach(function(tabCls) {
+      var tab = _BULK_TAB_MAP.find(function(t) { return t.cls === tabCls; });
+      if (!tab) return;
+      var data = _bmCollectData(talent, tab.cls);
+      if (!data.rows.length) return;
+      var aoa = [data.header].concat(data.rows);
+      var ws = XLSX.utils.aoa_to_sheet(aoa);
+      var sheetName = (talent + ' - ' + tab.name).substring(0, 31);
+      var finalName = sheetName;
+      var suffix = 2;
+      while (wb.SheetNames.indexOf(finalName) >= 0) {
+        finalName = sheetName.substring(0, 28) + ' ' + suffix++;
+      }
+      XLSX.utils.book_append_sheet(wb, ws, finalName);
+      sheetCount++;
+    });
+  });
+
+  if (!sheetCount) { alert('No hay datos para exportar en la selección realizada.'); return; }
+  var date = new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb, 'Export Masivo ' + date + '.xlsx');
+  closeBulkModal();
+}
+
+function bulkExportPDF() {
+  var talents = _bmGetTalents();
+  var tabs    = _bmGetTabs();
+  if (!talents.length || !tabs.length) { alert('Seleccioná al menos un talento y una solapa.'); return; }
+  if (typeof window.jspdf === 'undefined') { alert('No se pudo cargar el módulo de PDF. Revisá tu conexión a internet.'); return; }
+
+  var doc = new window.jspdf.jsPDF({orientation: 'landscape', unit: 'pt', format: 'a4'});
+  var dateStr = new Date().toLocaleString('es-AR');
+  var isFirst = true;
+
+  talents.forEach(function(talent) {
+    tabs.forEach(function(tabCls) {
+      var tab = _BULK_TAB_MAP.find(function(t) { return t.cls === tabCls; });
+      if (!tab) return;
+      var data = _bmCollectData(talent, tab.cls);
+      if (!data.rows.length) return;
+
+      if (!isFirst) doc.addPage();
+      isFirst = false;
+
+      doc.setFontSize(13);
+      doc.text(talent + ' — ' + tab.name, 30, 28);
+      doc.setFontSize(8);
+      doc.text('Generado: ' + dateStr, 30, 42);
+      doc.autoTable({
+        head: [data.header],
+        body: data.rows,
+        startY: 52,
+        styles: {fontSize: 6.5, cellPadding: 3},
+        headStyles: {fillColor: [20, 22, 33]},
+        margin: {left: 30, right: 30}
+      });
+    });
+  });
+
+  if (isFirst) { alert('No hay datos para exportar en la selección realizada.'); return; }
+  doc.save('Export Masivo ' + new Date().toISOString().slice(0,10) + '.pdf');
+  closeBulkModal();
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeBulkModal();
+});
 """
 
 
@@ -1390,65 +1422,81 @@ def generar_html(talentos):
     </div>
   </div>
 </div>
-<div class="tbar">
-  <button class="tb active" data-tab="p" onclick="st('p',this)">Publicados <span class="tc" id="cp">—</span></button>
-  <button class="tb" data-tab="e" onclick="st('e',this)">Pendientes <span class="tc" id="ce">—</span></button>
-  <button class="tb" data-tab="f" onclick="st('f',this)">Finanzas <span class="tc" id="cf">—</span></button>
+<div class="tbar" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+  <div style="display:flex">
+    <button class="tb active" data-tab="p" onclick="st('p',this)">Publicados <span class="tc" id="cp">—</span></button>
+    <button class="tb" data-tab="e" onclick="st('e',this)">Pendientes <span class="tc" id="ce">—</span></button>
+    <button class="tb" data-tab="f" onclick="st('f',this)">Finanzas <span class="tc" id="cf">—</span></button>
+  </div>
+  <button class="bulk-btn" onclick="openBulkModal()">&#11015; Exportar Masivo</button>
 </div>
 <div class="main">
   <div class="panel active" id="pp">
     <div class="exp-bar">
-      <button class="exp-btn" onclick="openExportModal('pp','Publicados')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Exportar
-      </button>
+      <div class="exp-wrap">
+        <button class="exp-btn" onclick="toggleExportMenu('pp')">⬇ Exportar</button>
+        <div class="exp-menu" id="pp-expmenu">
+          <div class="exp-item" onclick="exportExcel('pp','Publicados')">📊 Excel (.xlsx)</div>
+          <div class="exp-item" onclick="exportPDF('pp','Publicados')">📄 PDF</div>
+        </div>
+      </div>
     </div>
     <div id="pp-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
   </div>
   <div class="panel" id="pe">
     <div class="exp-bar">
-      <button class="exp-btn" onclick="openExportModal('pe','Pendientes')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Exportar
-      </button>
+      <div class="exp-wrap">
+        <button class="exp-btn" onclick="toggleExportMenu('pe')">⬇ Exportar</button>
+        <div class="exp-menu" id="pe-expmenu">
+          <div class="exp-item" onclick="exportExcel('pe','Pendientes')">📊 Excel (.xlsx)</div>
+          <div class="exp-item" onclick="exportPDF('pe','Pendientes')">📄 PDF</div>
+        </div>
+      </div>
     </div>
     <div id="pe-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
   </div>
   <div class="panel" id="pf">
     <div class="exp-bar">
-      <button class="exp-btn" onclick="openExportModal('pf','Finanzas')">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Exportar
-      </button>
+      <div class="exp-wrap">
+        <button class="exp-btn" onclick="toggleExportMenu('pf')">⬇ Exportar</button>
+        <div class="exp-menu" id="pf-expmenu">
+          <div class="exp-item" onclick="exportExcel('pf','Finanzas')">📊 Excel (.xlsx)</div>
+          <div class="exp-item" onclick="exportPDF('pf','Finanzas')">📄 PDF</div>
+        </div>
+      </div>
     </div>
     <div id="pf-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
   </div>
 </div>
-<div class="exp-overlay" id="exp-overlay" onclick="if(event.target===this)closeExportModal()">
-  <div class="exp-modal">
-    <div class="exp-modal-hdr">
-      <div class="exp-modal-ttl">Exportar — <span id="exp-modal-ttl-tab"></span></div>
-      <button class="exp-modal-close" onclick="closeExportModal()">✕</button>
+<div id="bulk-modal" class="bm-overlay">
+  <div class="bm-box">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:22px">
+      <div class="bm-title">Exportar Masivo</div>
+      <button onclick="closeBulkModal()" style="background:transparent;border:none;color:var(--mu);font-size:18px;cursor:pointer;line-height:1">&#x2715;</button>
     </div>
-    <div class="exp-modal-sub">Seleccioná las columnas a incluir en el archivo</div>
-    <div class="exp-modal-ctrl">
-      <button class="exp-ctrl-btn" onclick="expSelAll(true)">✓ Todas</button>
-      <button class="exp-ctrl-btn" onclick="expSelAll(false)">✕ Ninguna</button>
-    </div>
-    <div class="exp-cols-grid" id="exp-cols-grid"></div>
-    <div class="exp-modal-footer">
-      <span class="exp-footer-info" id="exp-col-count"></span>
-      <div class="exp-footer-btns">
-        <button class="exp-f-cancel" onclick="closeExportModal()">Cancelar</button>
-        <button class="exp-f-pdf" onclick="doExportPDF()">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          PDF
-        </button>
-        <button class="exp-f-xlsx" onclick="doExportXLSX()">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12l2.5 3L14 9"/></svg>
-          Excel
-        </button>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+      <div>
+        <div class="bm-section-label">Influencers</div>
+        <input class="bm-search" type="text" placeholder="Buscar influencer..." oninput="bmFilterTalents(this.value)">
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <button class="bm-small-btn" onclick="bmSelectAll(true)">Todos</button>
+          <button class="bm-small-btn" onclick="bmSelectAll(false)">Ninguno</button>
+        </div>
+        <div id="bm-talent-list" class="bm-talent-list"></div>
       </div>
+      <div>
+        <div class="bm-section-label">Solapas</div>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
+          <label class="bm-cb"><input type="checkbox" class="bm-tab-cb" value="tp" checked> Publicados</label>
+          <label class="bm-cb"><input type="checkbox" class="bm-tab-cb" value="te" checked> Pendientes</label>
+          <label class="bm-cb"><input type="checkbox" class="bm-tab-cb" value="tf" checked> Finanzas</label>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:26px;justify-content:flex-end;border-top:1px solid var(--br);padding-top:18px">
+      <button class="bm-action-btn" onclick="closeBulkModal()">Cancelar</button>
+      <button class="bm-action-btn" onclick="bulkExportExcel()">&#128202; Excel (.xlsx)</button>
+      <button class="bm-action-btn primary" onclick="bulkExportPDF()">&#128196; PDF</button>
     </div>
   </div>
 </div>
@@ -1470,11 +1518,11 @@ if __name__ == "__main__":
     print("  Dashboard Talentos ZAS")
     print("=" * 55)
     try:
-        talent_names, subtareas, task_talent_map, task_amount_map, so_map, \
+        talent_names, subtareas, task_talent_map, so_map, \
             client_inv_map, po_map, vendor_inv_map = bajar_datos()
 
         print("\nConstruyendo datos...")
-        talentos = construir_datos(talent_names, subtareas, task_talent_map, task_amount_map,
+        talentos = construir_datos(talent_names, subtareas, task_talent_map,
                                    so_map, client_inv_map, po_map, vendor_inv_map)
         print(f"  ✓ {len(talentos)} talentos con datos")
 
@@ -1495,3 +1543,4 @@ if __name__ == "__main__":
         print(f"\n✗ ERROR: {e}")
         import traceback
         traceback.print_exc()
+        raise SystemExit(1)
