@@ -217,7 +217,7 @@ def bajar_datos():
             fields=["id", "order_id", "product_id", "task_id", "price_unit", "price_subtotal"],
         )
         for line in lines:
-            sol_price_map[line["id"]] = line.get("price_subtotal", 0)
+            sol_price_map[line["id"]] = line.get("price_unit", 0)
             if line.get("product_id"):
                 prod_name = line["product_id"][1] if isinstance(line["product_id"], list) else ""
                 sol_map[line["id"]] = _extract_talent_from_product(prod_name)
