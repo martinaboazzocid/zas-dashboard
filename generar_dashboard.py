@@ -1,4 +1,4 @@
-á#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Dashboard Talentos ZAS — Generador
 ====================================
