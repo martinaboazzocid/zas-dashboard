@@ -56,6 +56,10 @@ PAIS_LABELS = {
     "int":                       "Campañas Internacionales",
 }
 
+TALENT_ALIASES = {
+    "Rama": "Rama Palomeque",   # mismo influencer, distintas sociedades
+}
+
 
 def traducir_pais(val):
     if not val or val is False:
@@ -1546,6 +1550,16 @@ if __name__ == "__main__":
         talentos = construir_datos(talent_names, subtareas, task_talent_map,
                                    so_map, client_inv_map, po_map, vendor_inv_map)
         print(f"  ✓ {len(talentos)} talentos con datos")
+
+        # Aplicar alias: fusionar datos de talentos con nombre alternativo
+        for alias, canonical in TALENT_ALIASES.items():
+            if alias in talentos:
+                if canonical in talentos:
+                    for k in ["published", "pending", "finance"]:
+                        talentos[canonical][k].extend(talentos[alias][k])
+                else:
+                    talentos[canonical] = talentos[alias]
+                del talentos[alias]
 
         print("\nGenerando HTML...")
         html = generar_html(talentos)
