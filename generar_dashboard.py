@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+á#!/usr/bin/env python3
 """
 Dashboard Talentos ZAS — Generador
 ====================================
@@ -228,6 +228,9 @@ def bajar_datos():
             sol_id = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"]
             if sol_id in sol_map:
                 task_talent_map[t["id"]] = sol_map[sol_id]
+    task_price_map = {t["id"]: sol_price_map.get(
+        t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"], 0
+    ) for t in subtareas if t.get("sale_line_id")}
     for t in subtareas:
         if t["id"] not in task_talent_map:
             task_talent_map[t["id"]] = _extract_talent_from_task(t.get("name", ""))
@@ -420,7 +423,7 @@ def badge(cls, text):
     return f'<span class="badge {cls}">{text}</span>'
 
 
-def construir_datos(talent_names, subtareas, task_talent_map, so_map,
+def construir_datos(talent_names, subtareas, task_talent_map, task_price_map, so_map,
                     client_inv_map, po_map, vendor_inv_map):
     talent_tasks = defaultdict(list)
     for t in subtareas:
@@ -445,12 +448,10 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
             so_ids_seen.add(so["id"])
             fecha_pub = t.get("x_studio_fecha_de_publicacin")
             if fecha_pub and fecha_pub is not False:
-                _sol_lid = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"] if t.get("sale_line_id") else None
-                _line_price = sol_price_map.get(_sol_lid, 0) if _sol_lid else 0
+                _line_price = task_price_map.get(t["id"], 0)
                 published.append({"task": t, "so": so, "line_price": _line_price})
             else:
-                _sol_lid = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"] if t.get("sale_line_id") else None
-                _line_price = sol_price_map.get(_sol_lid, 0) if _sol_lid else 0
+                _line_price = task_price_map.get(t["id"], 0)
                 pending.append({"task": t, "so": so, "line_price": _line_price})
 
         finance = []
@@ -1553,7 +1554,7 @@ if __name__ == "__main__":
             client_inv_map, po_map, vendor_inv_map = bajar_datos()
 
         print("\nConstruyendo datos...")
-        talentos = construir_datos(talent_names, subtareas, task_talent_map,
+        talentos = construir_datos(talent_names, subtareas, task_talent_map, task_price_map,
                                    so_map, client_inv_map, po_map, vendor_inv_map)
         print(f"  ✓ {len(talentos)} talentos con datos")
 
