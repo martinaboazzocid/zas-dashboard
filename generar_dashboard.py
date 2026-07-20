@@ -1284,10 +1284,12 @@ function bulkExportExcel() {
   if (!talents.length || !tabs.length) { alert('Seleccioná al menos un talento y una solapa.'); return; }
   if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel. Revisá tu conexión a internet.'); return; }
 
-  var wb = XLSX.utils.book_new();
-  var sheetCount = 0;
+  var date = new Date().toISOString().slice(0,10);
+  var exported = 0;
 
   talents.forEach(function(talent) {
+    var wb = XLSX.utils.book_new();
+
     tabs.forEach(function(tabCls) {
       var tab = _BULK_TAB_MAP.find(function(t) { return t.cls === tabCls; });
       if (!tab) return;
@@ -1295,20 +1297,16 @@ function bulkExportExcel() {
       if (!data.rows.length) return;
       var aoa = [data.header].concat(data.rows);
       var ws = XLSX.utils.aoa_to_sheet(aoa);
-      var sheetName = (talent + ' - ' + tab.name).substring(0, 31);
-      var finalName = sheetName;
-      var suffix = 2;
-      while (wb.SheetNames.indexOf(finalName) >= 0) {
-        finalName = sheetName.substring(0, 28) + ' ' + suffix++;
-      }
-      XLSX.utils.book_append_sheet(wb, ws, finalName);
-      sheetCount++;
+      XLSX.utils.book_append_sheet(wb, ws, tab.name);
     });
+
+    if (wb.SheetNames.length) {
+      XLSX.writeFile(wb, talent + ' - ' + date + '.xlsx');
+      exported++;
+    }
   });
 
-  if (!sheetCount) { alert('No hay datos para exportar en la selección realizada.'); return; }
-  var date = new Date().toISOString().slice(0,10);
-  XLSX.writeFile(wb, 'Export Masivo ' + date + '.xlsx');
+  if (!exported) { alert('No hay datos para exportar en la selección realizada.'); return; }
   closeBulkModal();
 }
 
