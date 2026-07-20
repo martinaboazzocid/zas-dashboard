@@ -305,7 +305,7 @@ def bajar_datos():
                     vendor_invoices_map[po["id"]].append(vinv)
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
 
-    return talent_names, subtareas, task_talent_map, so_map, client_invoices_map, po_map, vendor_invoices_map
+    return talent_names, subtareas, task_talent_map, task_price_map, so_map, client_invoices_map, po_map, vendor_invoices_map
 
 
 def _normalizar_nombre(nombre):
@@ -1550,7 +1550,7 @@ if __name__ == "__main__":
     print("  Dashboard Talentos ZAS")
     print("=" * 55)
     try:
-        talent_names, subtareas, task_talent_map, so_map, \
+        talent_names, subtareas, task_talent_map, task_price_map, so_map, \
             client_inv_map, po_map, vendor_inv_map = bajar_datos()
 
         print("\nConstruyendo datos...")
