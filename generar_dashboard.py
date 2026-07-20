@@ -247,6 +247,18 @@ def bajar_datos():
                 if inv and inv["move_type"] in ("out_invoice", "out_refund") and inv["state"] != "cancel":
                     client_invoices_map[so["id"]].append(inv)
         print(f"    {len(inv_ids)} facturas  ✓")
+
+        # ── DEBUG TEMPORAL: mostrar facturas de AR00859 ──────────────
+        for so in sale_orders:
+            if so.get("name") == "AR00859":
+                invs_debug = client_invoices_map.get(so["id"], [])
+                print(f"\n  [DEBUG AR00859] invoice_ids en SO: {so.get('invoice_ids')}")
+                print(f"  [DEBUG AR00859] Facturas encontradas: {len(invs_debug)}")
+                for inv in invs_debug:
+                    print(f"    - {inv.get('name')} | move_type={inv.get('move_type')} | state={inv.get('state')} | payment_state={inv.get('payment_state')} | amount_untaxed={inv.get('amount_untaxed')}")
+                if not invs_debug:
+                    print("  [DEBUG AR00859] NINGUNA factura encontrada via invoice_ids")
+        # ─────────────────────────────────────────────────────────────
     else:
         print("    Sin facturas")
 
