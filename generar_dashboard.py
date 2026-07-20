@@ -479,7 +479,10 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
             dues        = sorted(i["invoice_date_due"] for i in facturas_activas if i.get("invoice_date_due"))
             vencimiento = fmt_date(dues[-1]) if dues else None
 
-            if not facturas:
+            if neto == 0:
+                factura_status = "canje"
+                cobro_status, cobro_fecha = None, None
+            elif not facturas:
                 factura_status = "pendiente_factura"
                 cobro_status, cobro_fecha = None, None
             elif is_100:
@@ -543,7 +546,10 @@ def _render_fact_cobro_cell(f):
     fs = f["factura_status"]
     cs = f["cobro_status"]
 
-    if fs == "pendiente_factura":
+    if fs == "canje":
+        fact_part  = badge("bd", "Canje")
+        cobro_part = badge("bd", "—")
+    elif fs == "pendiente_factura":
         fact_part  = badge("by", "Pendiente factura")
         cobro_part = badge("bd", "—")
     elif fs == "100":
@@ -689,8 +695,9 @@ def render_finance(finance):
         so = f["so"]
 
         fs = f["factura_status"]
-        fact_h = (badge("by", "Pendiente factura") if fs == "pendiente_factura"
-                  else badge("bg", "✓ 100%") if fs == "100"
+        fact_h = (badge("bd", "Canje")             if fs == "canje"
+                  else badge("by", "Pendiente factura") if fs == "pendiente_factura"
+                  else badge("bg", "✓ 100%")            if fs == "100"
                   else badge("by", f"{fs} facturado"))
 
         venc_h  = (f'<span class="dv">{f["vencimiento"]}</span>' if f["vencimiento"]
@@ -725,7 +732,7 @@ def render_finance(finance):
         pais_h   = f'<span class="pt">{pais_txt}</span>'
 
         # data-v para "Fact. cliente": almacenar el pct_fact numérico para filtro condicional
-        fact_data_v = str(f["pct_fact"]) if fs not in ("pendiente_factura",) else "pendiente_factura"
+        fact_data_v = str(f["pct_fact"]) if fs not in ("pendiente_factura", "canje") else fs
 
         rows += f"""<tr>
           <td data-v="{so["name"]}"><span class="num">{so["name"]}</span></td>
@@ -1077,9 +1084,9 @@ function applyFinFilter(tw) {
       if (pctFilter.type === 'pendiente') {
         show = rawVal === 'pendiente_factura';
       } else {
-        // Es numérico: si la celda es "pendiente_factura" o "100" (string con 100%)
-        var cellNum = (rawVal === '100' || rawVal === 'pendiente_factura')
-          ? (rawVal === '100' ? 100 : NaN)
+        // Es numérico: si la celda es "pendiente_factura", "canje" o "100"
+        var cellNum = (rawVal === '100') ? 100
+          : (rawVal === 'pendiente_factura' || rawVal === 'canje') ? NaN
           : parseFloat(rawVal);
         if (isNaN(cellNum)) {
           show = false;
