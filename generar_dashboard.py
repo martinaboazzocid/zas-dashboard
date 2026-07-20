@@ -442,8 +442,12 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
             notas_cr = [i for i in cinvs if i.get("move_type") == "out_refund"]
             tot_fact = (sum(i.get("amount_untaxed") or 0 for i in facturas)
                         - sum(i.get("amount_untaxed") or 0 for i in notas_cr))
-            all_paid = bool(facturas) and all(
-                i.get("payment_state") in ("paid", "in_payment") for i in facturas
+            # Facturas activas: excluir las revertidas (anuladas con nota de crédito).
+            # Su cobro ya está reflejado en la nota de crédito; incluirlas en all_paid
+            # causaría falsos negativos porque payment_state="reversed" ≠ "paid".
+            facturas_activas = [i for i in facturas if i.get("payment_state") != "reversed"]
+            all_paid = bool(facturas_activas) and all(
+                i.get("payment_state") in ("paid", "in_payment") for i in facturas_activas
             )
 
             # ── MEJORA 2: si la venta está 100% pagada (factura consolidada),
@@ -460,7 +464,7 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
 
             is_100 = bool(facturas) and pct_fact >= 100
 
-            dues        = sorted(i["invoice_date_due"] for i in facturas if i.get("invoice_date_due"))
+            dues        = sorted(i["invoice_date_due"] for i in facturas_activas if i.get("invoice_date_due"))
             vencimiento = fmt_date(dues[-1]) if dues else None
 
             if not facturas:
