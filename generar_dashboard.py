@@ -183,12 +183,12 @@ def bajar_datos():
         )
         for _l in _lns:
             if _l.get("order_id"):
-                _line_to_order[_l["id"]] = _l["order_id"][0] if isinstance(_l["order_id"], list) else _l["order_id"]
+                _line_to_order[_l["id"]] = _l["order_id"]
     for t in subtareas:
         if not t.get("sale_order_id") and t.get("sale_line_id"):
             _lid = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"]
             if _lid in _line_to_order:
-                t["sale_order_id"] = [_line_to_order[_lid]]
+                t["sale_order_id"] = _line_to_order[_lid]
 
 
     so_ids = list({
