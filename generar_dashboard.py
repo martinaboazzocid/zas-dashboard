@@ -208,14 +208,16 @@ def bajar_datos():
     print("\n[5/7] Líneas de venta...")
     sol_ids_all = list({lid for so in sale_orders for lid in (so.get("order_line") or [])})
     sol_map = {}
+    sol_price_map = {}
     for i in range(0, len(sol_ids_all), 200):
         lines = fetch_all(
             session,
             model="sale.order.line",
             domain=[["id", "in", sol_ids_all[i:i+200]]],
-            fields=["id", "order_id", "product_id", "task_id"],
+            fields=["id", "order_id", "product_id", "task_id", "price_unit", "price_subtotal"],
         )
         for line in lines:
+            sol_price_map[line["id"]] = line.get("price_subtotal", 0)
             if line.get("product_id"):
                 prod_name = line["product_id"][1] if isinstance(line["product_id"], list) else ""
                 sol_map[line["id"]] = _extract_talent_from_product(prod_name)
@@ -443,9 +445,13 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
             so_ids_seen.add(so["id"])
             fecha_pub = t.get("x_studio_fecha_de_publicacin")
             if fecha_pub and fecha_pub is not False:
-                published.append({"task": t, "so": so})
+                _sol_lid = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"] if t.get("sale_line_id") else None
+                _line_price = sol_price_map.get(_sol_lid, 0) if _sol_lid else 0
+                published.append({"task": t, "so": so, "line_price": _line_price})
             else:
-                pending.append({"task": t, "so": so})
+                _sol_lid = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"] if t.get("sale_line_id") else None
+                _line_price = sol_price_map.get(_sol_lid, 0) if _sol_lid else 0
+                pending.append({"task": t, "so": so, "line_price": _line_price})
 
         finance = []
         for so_id in so_ids_seen:
@@ -618,7 +624,7 @@ def render_published(published, finance_by_so=None):
               <td><span class="sm">{get_marca(so)}</span></td>
               <td><span class="sm">{get_campana(so)}</span></td>
               <td>{badge("bd", get_currency(so))}</td>
-              <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
+              <td class="amt">{fmt_num(item.get("line_price") or so.get("amount_untaxed"))}</td>
               <td><span class="dv">{fmt_date(t["x_studio_fecha_de_publicacin"]) or "—"}</span></td>
               <td><span class="pt">{pais or "—"}</span></td>
               <td>{_render_fact_cobro_cell(f_dat)}</td>
@@ -663,7 +669,7 @@ def render_pending(pending, finance_by_so=None):
           <td><span class="sm">{get_marca(so)}</span></td>
           <td><span class="sm">{get_campana(so)}</span></td>
           <td>{badge("bd", get_currency(so))}</td>
-          <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
+          <td class="amt">{fmt_num(item.get("line_price") or so.get("amount_untaxed"))}</td>
           <td>{est_html}</td>
           <td><span class="pt">{pais or "—"}</span></td>
           <td>{_render_fact_cobro_cell(f_dat)}</td>
