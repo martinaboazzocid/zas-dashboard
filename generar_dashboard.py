@@ -161,12 +161,35 @@ def bajar_datos():
     subtareas = fetch_all(
         session,
         model="project.task",
-        domain=[["parent_id", "!=", False], ["sale_order_id", "!=", False]],
+        domain=[["parent_id", "!=", False], "|", ["sale_order_id", "!=", False], ["sale_line_id", "!=", False]],
         fields=["id", "name", "parent_id", "sale_order_id", "sale_line_id", "stage_id",
                 "x_studio_fecha_de_publicacin", "x_studio_fecha_limite",
                 "date_deadline", "company_id", "project_id"],
         label="subtareas"
     )
+    # Derivar sale_order_id desde sale_line_id para tareas que no lo tienen
+    _line_ids_sin_so = list({
+        (t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"])
+        for t in subtareas
+        if t.get("sale_line_id") and not t.get("sale_order_id")
+    })
+    _line_to_order = {}
+    for i in range(0, len(_line_ids_sin_so), 200):
+        _lns = fetch_all(
+            session,
+            model="sale.order.line",
+            domain=[["id", "in", _line_ids_sin_so[i:i+200]]],
+            fields=["id", "order_id"],
+        )
+        for _l in _lns:
+            if _l.get("order_id"):
+                _line_to_order[_l["id"]] = _l["order_id"][0] if isinstance(_l["order_id"], list) else _l["order_id"]
+    for t in subtareas:
+        if not t.get("sale_order_id") and t.get("sale_line_id"):
+            _lid = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"]
+            if _lid in _line_to_order:
+                t["sale_order_id"] = [_line_to_order[_lid]]
+
 
     so_ids = list({
         (t["sale_order_id"][0] if isinstance(t["sale_order_id"], list) else t["sale_order_id"])
