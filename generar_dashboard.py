@@ -625,7 +625,7 @@ def render_published(published, finance_by_so=None):
               <td><span class="sm">{get_marca(so)}</span></td>
               <td><span class="sm">{get_campana(so)}</span></td>
               <td>{badge("bd", get_currency(so))}</td>
-              <td class="amt">{fmt_num(item.get("line_price") or so.get("amount_untaxed"))}</td>
+              <td class="amt">{fmt_num(it.get("line_price") or so.get("amount_untaxed"))}</td>
               <td><span class="dv">{fmt_date(t["x_studio_fecha_de_publicacin"]) or "—"}</span></td>
               <td><span class="pt">{pais or "—"}</span></td>
               <td>{_render_fact_cobro_cell(f_dat)}</td>
@@ -670,7 +670,7 @@ def render_pending(pending, finance_by_so=None):
           <td><span class="sm">{get_marca(so)}</span></td>
           <td><span class="sm">{get_campana(so)}</span></td>
           <td>{badge("bd", get_currency(so))}</td>
-          <td class="amt">{fmt_num(item.get("line_price") or so.get("amount_untaxed"))}</td>
+          <td class="amt">{fmt_num(it.get("line_price") or so.get("amount_untaxed"))}</td>
           <td>{est_html}</td>
           <td><span class="pt">{pais or "—"}</span></td>
           <td>{_render_fact_cobro_cell(f_dat)}</td>
