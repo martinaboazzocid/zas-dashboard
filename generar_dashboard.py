@@ -61,6 +61,7 @@ TALENT_ALIASES = {
     "Sofi Cañon": "Sofia Cañon",        # misma influencer, variantes de nombre
     "[10] Sofi Cañon": "Sofia Cañon",
     "[11] Sofi Cañon": "Sofia Cañon",
+    "Julian": "Julian Forero",          # producto "JULIAN " incompleto = Julian Forero
 }
 
 
