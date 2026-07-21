@@ -240,13 +240,19 @@ def bajar_datos():
             session,
             model="sale.order.line",
             domain=[["id", "in", sol_ids_all[i:i+200]]],
-            fields=["id", "order_id", "product_id", "task_id", "price_unit", "price_subtotal"],
+            fields=["id", "order_id", "product_id", "task_id", "price_unit", "price_subtotal", "name"],
         )
         for line in lines:
             sol_price_map[line["id"]] = line.get("price_unit", 0)
+            _lname = (line.get("name") or "").split("\n")[0].strip()
+            _pname = ""
             if line.get("product_id"):
-                prod_name = line["product_id"][1] if isinstance(line["product_id"], list) else ""
-                sol_map[line["id"]] = _extract_talent_from_product(prod_name)
+                _pname = line["product_id"][1] if isinstance(line["product_id"], list) else ""
+            # Preferir el nombre de la línea (refleja el talento contratado);
+            # el producto puede estar mal vinculado en Odoo (p.ej. US00530).
+            _fuente = _lname if "(" in _lname else _pname
+            if _fuente:
+                sol_map[line["id"]] = _extract_talent_from_product(_fuente)
 
     task_talent_map = {}
     for t in subtareas:
