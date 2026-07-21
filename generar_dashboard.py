@@ -58,6 +58,9 @@ PAIS_LABELS = {
 
 TALENT_ALIASES = {
     "Rama": "Rama Palomeque",   # mismo influencer, distintas sociedades
+    "Sofi Cañon": "Sofia Cañon",        # misma influencer, variantes de nombre
+    "[10] Sofi Cañon": "Sofia Cañon",
+    "[11] Sofi Cañon": "Sofia Cañon",
 }
 
 
@@ -1587,6 +1590,7 @@ if __name__ == "__main__":
                 if canonical in talentos:
                     for k in ["published", "pending", "finance"]:
                         talentos[canonical][k].extend(talentos[alias][k])
+                    talentos[canonical]["finance_by_so"].update(talentos[alias]["finance_by_so"])
                 else:
                     talentos[canonical] = talentos[alias]
                 del talentos[alias]
