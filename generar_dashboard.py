@@ -13,8 +13,16 @@ Salida:
 
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
+
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+    print("⚠ openpyxl no instalado. % Talento desde ROSTER no estará disponible.")
+    print("  Instalar: pip install openpyxl")
 
 # ══════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -29,6 +37,12 @@ OUTPUT_FILE = "dashboard_talentos.html"
 MEXICO_ID       = 3
 ALL_COMPANY_IDS = [1, 2, 3, 4, 5, 6]
 BATCH           = 500
+
+# Archivo ROSTER (debe estar en la misma carpeta que este script)
+ROSTER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roster.xlsx")
+
+# Tipos de contrato artístico (valores internos de Odoo, case-insensitive)
+ARTISTIC_CONTRACT_TYPES = {"artistico", "artístico", "artistic", "artísticos", "artisticos"}
 
 PAIS_LABELS = {
     "Campañas":                  "Campañas Argentinas",
@@ -56,14 +70,6 @@ PAIS_LABELS = {
     "int":                       "Campañas Internacionales",
 }
 
-TALENT_ALIASES = {
-    "Rama": "Rama Palomeque",   # mismo influencer, distintas sociedades
-    "Sofi Cañon": "Sofia Cañon",        # misma influencer, variantes de nombre
-    "[10] Sofi Cañon": "Sofia Cañon",
-    "[11] Sofi Cañon": "Sofia Cañon",
-    "Julian": "Julian Forero",          # producto "JULIAN " incompleto = Julian Forero
-}
-
 
 def traducir_pais(val):
     if not val or val is False:
@@ -79,6 +85,94 @@ def traducir_pais(val):
             return v
     return val
 
+
+# ══════════════════════════════════════════════════════════════
+# ROSTER — % ZAS por talento por mes
+# ══════════════════════════════════════════════════════════════
+
+def cargar_roster():
+    """
+    Carga roster.xlsx y devuelve dict:
+        { NOMBRE_UPPER: { (year, month): zas_pct_float } }
+    Los meses con valor 'EXTERNO' no se incluyen (sin contrato ese mes).
+    """
+    if not HAS_OPENPYXL:
+        return {}
+    if not os.path.exists(ROSTER_FILE):
+        print(f"    ⚠ ROSTER no encontrado en: {ROSTER_FILE}")
+        print("      Copiá roster.xlsx a la misma carpeta que este script.")
+        return {}
+    try:
+        wb = openpyxl.load_workbook(ROSTER_FILE, data_only=True)
+        ws = wb.active
+
+        # Fila 1: Creator, Country, Signing Date, Termination Date, [fechas de mes...]
+        headers = [cell.value for cell in ws[1]]
+        month_cols = []  # [(col_idx_0based, (year, month)), ...]
+        for i, h in enumerate(headers[4:], start=4):
+            if h and isinstance(h, datetime):
+                month_cols.append((i, (h.year, h.month)))
+
+        roster = {}
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            name = row[0]
+            if not name:
+                continue
+            name_clean = str(name).strip().upper().replace("\n", "").replace("\r", "")
+            roster[name_clean] = {}
+            for col_idx, (year, month) in month_cols:
+                val = row[col_idx] if col_idx < len(row) else None
+                if val is not None and val != "EXTERNO" and isinstance(val, (int, float)):
+                    roster[name_clean][(year, month)] = float(val)
+
+        print(f"    ✓ ROSTER cargado: {len(roster)} talentos")
+        return roster
+    except Exception as e:
+        print(f"    ⚠ Error cargando ROSTER: {e}")
+        return {}
+
+
+def get_zas_pct(roster, talent_name, sale_date_str):
+    """
+    Devuelve el % de ZAS (0.0-1.0) para un talento en el mes de la venta.
+    Retorna None si no se encuentra.
+    """
+    if not roster or not talent_name or not sale_date_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(sale_date_str)[:10])
+        year, month = dt.year, dt.month
+    except Exception:
+        return None
+
+    name_upper = str(talent_name).strip().upper().replace("\n", "")
+
+    # Búsqueda directa
+    if name_upper in roster:
+        return roster[name_upper].get((year, month))
+
+    # Búsqueda tolerante (puede haber pequeñas diferencias)
+    for roster_name, vals in roster.items():
+        if roster_name.strip() == name_upper.strip():
+            return vals.get((year, month))
+
+    return None
+
+
+def es_venta_artistica(so):
+    """True si el tipo de contrato es artístico (talento recibe 80%)."""
+    tipo = so.get("x_studio_tipo_de_contrato")
+    if not tipo or tipo is False:
+        return False
+    if isinstance(tipo, (list, tuple)):
+        tipo = tipo[1] if len(tipo) > 1 else str(tipo[0])
+    tipo_str = str(tipo).lower().strip()
+    return tipo_str in ARTISTIC_CONTRACT_TYPES or "artis" in tipo_str
+
+
+# ══════════════════════════════════════════════════════════════
+# ODOO
+# ══════════════════════════════════════════════════════════════
 
 def login(session):
     print("  Autenticando...")
@@ -165,35 +259,12 @@ def bajar_datos():
     subtareas = fetch_all(
         session,
         model="project.task",
-        domain=[["parent_id", "!=", False], "|", ["sale_order_id", "!=", False], ["sale_line_id", "!=", False]],
+        domain=[["parent_id", "!=", False], ["sale_order_id", "!=", False]],
         fields=["id", "name", "parent_id", "sale_order_id", "sale_line_id", "stage_id",
                 "x_studio_fecha_de_publicacin", "x_studio_fecha_limite",
                 "date_deadline", "company_id", "project_id"],
         label="subtareas"
     )
-    # Derivar sale_order_id desde sale_line_id para tareas que no lo tienen
-    _line_ids_sin_so = list({
-        (t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"])
-        for t in subtareas
-        if t.get("sale_line_id") and not t.get("sale_order_id")
-    })
-    _line_to_order = {}
-    for i in range(0, len(_line_ids_sin_so), 200):
-        _lns = fetch_all(
-            session,
-            model="sale.order.line",
-            domain=[["id", "in", _line_ids_sin_so[i:i+200]]],
-            fields=["id", "order_id"],
-        )
-        for _l in _lns:
-            if _l.get("order_id"):
-                _line_to_order[_l["id"]] = _l["order_id"]
-    for t in subtareas:
-        if not t.get("sale_order_id") and t.get("sale_line_id"):
-            _lid = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"]
-            if _lid in _line_to_order:
-                t["sale_order_id"] = _line_to_order[_lid]
-
 
     so_ids = list({
         (t["sale_order_id"][0] if isinstance(t["sale_order_id"], list) else t["sale_order_id"])
@@ -235,25 +306,17 @@ def bajar_datos():
     print("\n[5/7] Líneas de venta...")
     sol_ids_all = list({lid for so in sale_orders for lid in (so.get("order_line") or [])})
     sol_map = {}
-    sol_price_map = {}
     for i in range(0, len(sol_ids_all), 200):
         lines = fetch_all(
             session,
             model="sale.order.line",
             domain=[["id", "in", sol_ids_all[i:i+200]]],
-            fields=["id", "order_id", "product_id", "task_id", "price_unit", "price_subtotal", "name"],
+            fields=["id", "order_id", "product_id", "task_id"],
         )
         for line in lines:
-            sol_price_map[line["id"]] = line.get("price_unit", 0)
-            _lname = (line.get("name") or "").split("\n")[0].strip()
-            _pname = ""
             if line.get("product_id"):
-                _pname = line["product_id"][1] if isinstance(line["product_id"], list) else ""
-            # Preferir el nombre de la línea (refleja el talento contratado);
-            # el producto puede estar mal vinculado en Odoo (p.ej. US00530).
-            _fuente = _lname if "(" in _lname else _pname
-            if _fuente:
-                sol_map[line["id"]] = _extract_talent_from_product(_fuente)
+                prod_name = line["product_id"][1] if isinstance(line["product_id"], list) else ""
+                sol_map[line["id"]] = _extract_talent_from_product(prod_name)
 
     task_talent_map = {}
     for t in subtareas:
@@ -261,9 +324,6 @@ def bajar_datos():
             sol_id = t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"]
             if sol_id in sol_map:
                 task_talent_map[t["id"]] = sol_map[sol_id]
-    task_price_map = {t["id"]: sol_price_map.get(
-        t["sale_line_id"][0] if isinstance(t["sale_line_id"], list) else t["sale_line_id"], 0
-    ) for t in subtareas if t.get("sale_line_id")}
     for t in subtareas:
         if t["id"] not in task_talent_map:
             task_talent_map[t["id"]] = _extract_talent_from_task(t.get("name", ""))
@@ -289,18 +349,6 @@ def bajar_datos():
                 if inv and inv["move_type"] in ("out_invoice", "out_refund") and inv["state"] != "cancel":
                     client_invoices_map[so["id"]].append(inv)
         print(f"    {len(inv_ids)} facturas  ✓")
-
-        # ── DEBUG TEMPORAL: mostrar facturas de AR00859 ──────────────
-        for so in sale_orders:
-            if so.get("name") == "AR00859":
-                invs_debug = client_invoices_map.get(so["id"], [])
-                print(f"\n  [DEBUG AR00859] invoice_ids en SO: {so.get('invoice_ids')}")
-                print(f"  [DEBUG AR00859] Facturas encontradas: {len(invs_debug)}")
-                for inv in invs_debug:
-                    print(f"    - {inv.get('name')} | move_type={inv.get('move_type')} | state={inv.get('state')} | payment_state={inv.get('payment_state')} | amount_untaxed={inv.get('amount_untaxed')}")
-                if not invs_debug:
-                    print("  [DEBUG AR00859] NINGUNA factura encontrada via invoice_ids")
-        # ─────────────────────────────────────────────────────────────
     else:
         print("    Sin facturas")
 
@@ -338,7 +386,7 @@ def bajar_datos():
                     vendor_invoices_map[po["id"]].append(vinv)
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
 
-    return talent_names, subtareas, task_talent_map, task_price_map, so_map, client_invoices_map, po_map, vendor_invoices_map
+    return talent_names, subtareas, task_talent_map, so_map, client_invoices_map, po_map, vendor_invoices_map
 
 
 def _normalizar_nombre(nombre):
@@ -456,8 +504,12 @@ def badge(cls, text):
     return f'<span class="badge {cls}">{text}</span>'
 
 
-def construir_datos(talent_names, subtareas, task_talent_map, task_price_map, so_map,
-                    client_inv_map, po_map, vendor_inv_map):
+# ══════════════════════════════════════════════════════════════
+# CONSTRUIR DATOS
+# ══════════════════════════════════════════════════════════════
+
+def construir_datos(talent_names, subtareas, task_talent_map, so_map,
+                    client_inv_map, po_map, vendor_inv_map, roster=None):
     talent_tasks = defaultdict(list)
     for t in subtareas:
         talent = task_talent_map.get(t["id"], _extract_talent_from_task(t.get("name", "")))
@@ -481,11 +533,9 @@ def construir_datos(talent_names, subtareas, task_talent_map, task_price_map, so
             so_ids_seen.add(so["id"])
             fecha_pub = t.get("x_studio_fecha_de_publicacin")
             if fecha_pub and fecha_pub is not False:
-                _line_price = task_price_map.get(t["id"], 0)
-                published.append({"task": t, "so": so, "line_price": _line_price})
+                published.append({"task": t, "so": so})
             else:
-                _line_price = task_price_map.get(t["id"], 0)
-                pending.append({"task": t, "so": so, "line_price": _line_price})
+                pending.append({"task": t, "so": so})
 
         finance = []
         for so_id in so_ids_seen:
@@ -498,16 +548,10 @@ def construir_datos(talent_names, subtareas, task_talent_map, task_price_map, so
             notas_cr = [i for i in cinvs if i.get("move_type") == "out_refund"]
             tot_fact = (sum(i.get("amount_untaxed") or 0 for i in facturas)
                         - sum(i.get("amount_untaxed") or 0 for i in notas_cr))
-            # Facturas activas: excluir las revertidas (anuladas con nota de crédito).
-            # Su cobro ya está reflejado en la nota de crédito; incluirlas en all_paid
-            # causaría falsos negativos porque payment_state="reversed" ≠ "paid".
-            facturas_activas = [i for i in facturas if i.get("payment_state") != "reversed"]
-            all_paid = bool(facturas_activas) and all(
-                i.get("payment_state") in ("paid", "in_payment") for i in facturas_activas
+            all_paid = bool(facturas) and all(
+                i.get("payment_state") in ("paid", "in_payment") for i in facturas
             )
 
-            # ── MEJORA 2: si la venta está 100% pagada (factura consolidada),
-            #    forzar pct_fact=100 aunque tot_fact > neto ──────────────────
             if neto > 0:
                 pct_fact_raw = (tot_fact / neto) * 100
             else:
@@ -520,13 +564,10 @@ def construir_datos(talent_names, subtareas, task_talent_map, task_price_map, so
 
             is_100 = bool(facturas) and pct_fact >= 100
 
-            dues        = sorted(i["invoice_date_due"] for i in facturas_activas if i.get("invoice_date_due"))
+            dues        = sorted(i["invoice_date_due"] for i in facturas if i.get("invoice_date_due"))
             vencimiento = fmt_date(dues[-1]) if dues else None
 
-            if neto == 0:
-                factura_status = "canje"
-                cobro_status, cobro_fecha = None, None
-            elif not facturas:
+            if not facturas:
                 factura_status = "pendiente_factura"
                 cobro_status, cobro_fecha = None, None
             elif is_100:
@@ -537,13 +578,30 @@ def construir_datos(talent_names, subtareas, task_talent_map, task_price_map, so
                 factura_status = f"{pct_fact}%"
                 cobro_status, cobro_fecha = None, None
 
+            # ── Fecha estimada de pago (vencimiento + 10 días) ─────────────
+            if not facturas:
+                fecha_est_pago = "Pendiente facturar"
+            elif dues:
+                try:
+                    raw_due = datetime.fromisoformat(str(dues[-1])[:10])
+                    fecha_est_pago = (raw_due + timedelta(days=10)).strftime("%d/%m/%Y")
+                except Exception:
+                    fecha_est_pago = "Pendiente facturar"
+            else:
+                fecha_est_pago = "Pendiente facturar"
+
+            # ── OC y facturas proveedor ────────────────────────────────────
             po       = po_map.get(so["name"])
             v_neto   = None
             v_status = None
             v_fecha  = None
             v_nums   = ""
+            status_pago_talento = "Sin OC"
+
             if po:
-                vinvs = vendor_inv_map.get(po["id"], [])
+                vinvs    = vendor_inv_map.get(po["id"], [])
+                po_amount = po.get("amount_untaxed") or 0
+
                 if vinvs:
                     v_neto   = sum(i.get("amount_untaxed") or 0 for i in vinvs)
                     v_paid   = all(i.get("payment_state") in ("paid", "in_payment") for i in vinvs)
@@ -551,8 +609,37 @@ def construir_datos(talent_names, subtareas, task_talent_map, task_price_map, so
                     v_fecha  = fmt_date(v_dues[-1]) if v_dues else None
                     v_status = "pagado" if v_paid else "pendiente"
                     v_nums   = get_nums_facturas_prov(vinvs)
+
+                    # Status de pago al talento: compara total pagado vs OC
+                    paid_total = sum(
+                        i.get("amount_untaxed") or 0
+                        for i in vinvs
+                        if i.get("payment_state") in ("paid", "in_payment")
+                    )
+                    if paid_total <= 0:
+                        status_pago_talento = "PENDIENTE"
+                    elif po_amount > 0 and paid_total >= po_amount * 0.999:
+                        status_pago_talento = "PAGADO"
+                    else:
+                        status_pago_talento = "PAGO PARCIAL"
                 else:
                     v_status = "sin_factura"
+                    status_pago_talento = "PENDIENTE"
+
+            # ── % del talento por contrato ─────────────────────────────────
+            if es_venta_artistica(so):
+                pct_talento_real_label = "80% (Art.)"
+                pct_talento_real_val   = 80.0
+            else:
+                sale_date = so.get("date_order")
+                zas_pct = get_zas_pct(roster, talent_name, sale_date) if roster else None
+                if zas_pct is not None:
+                    talento_pct = (1.0 - zas_pct) * 100
+                    pct_talento_real_label = f"{talento_pct:.0f}%"
+                    pct_talento_real_val   = talento_pct
+                else:
+                    pct_talento_real_label = "—"
+                    pct_talento_real_val   = None
 
             pct_talento  = fmt_pct(v_neto, neto) if v_neto is not None else "—"
             fact_boleta  = get_factura_boleta(so)
@@ -568,32 +655,36 @@ def construir_datos(talent_names, subtareas, task_talent_map, task_price_map, so
                 "pct_talento": pct_talento,
                 "fact_boleta": fact_boleta,
                 "pais": pais_final(so),
+                # ── Nuevos campos ──────────────────────────────────────────
+                "fecha_est_pago":        fecha_est_pago,
+                "status_pago_talento":   status_pago_talento,
+                "pct_talento_real_label": pct_talento_real_label,
+                "pct_talento_real_val":   pct_talento_real_val,
             })
 
         finance.sort(key=lambda x: x["so"].get("name", ""))
-        # Índice rápido por nombre de venta para uso en render_published / render_pending
         finance_by_so = {f["so"]["name"]: f for f in finance}
         talentos[talent_name] = {
-            "published":    published,
-            "pending":      pending,
-            "finance":      finance,
+            "published":     published,
+            "pending":       pending,
+            "finance":       finance,
             "finance_by_so": finance_by_so,
         }
 
     return talentos
 
 
+# ══════════════════════════════════════════════════════════════
+# HELPERS DE RENDER (CELDAS)
+# ══════════════════════════════════════════════════════════════
+
 def _render_fact_cobro_cell(f):
-    """Genera el HTML para la celda Factura / Cobro en publicados/pendientes."""
     if f is None:
         return badge("bd", "—")
     fs = f["factura_status"]
     cs = f["cobro_status"]
 
-    if fs == "canje":
-        fact_part  = badge("bd", "Canje")
-        cobro_part = badge("bd", "—")
-    elif fs == "pendiente_factura":
+    if fs == "pendiente_factura":
         fact_part  = badge("by", "Pendiente factura")
         cobro_part = badge("bd", "—")
     elif fs == "100":
@@ -612,7 +703,6 @@ def _render_fact_cobro_cell(f):
 
 
 def _render_pago_talento_cell(f):
-    """Genera el HTML para la celda Pago talento en publicados/pendientes."""
     if f is None:
         return badge("bd", "—")
     if not f["tiene_po"]:
@@ -626,6 +716,48 @@ def _render_pago_talento_cell(f):
         return badge("br", "Pendiente pago")
     return badge("bd", "—")
 
+
+def _render_fecha_est_pago_cell(f):
+    """Celda: Fecha estimada de pago (vencimiento + 10 días)."""
+    if f is None:
+        return badge("bd", "—")
+    fep = f.get("fecha_est_pago")
+    if not fep:
+        return badge("bd", "—")
+    if fep == "Pendiente facturar":
+        return badge("by", "Pend. facturar")
+    return f'<span class="dv">{fep}</span>'
+
+
+def _render_status_pago_talento_cell(f):
+    """Celda: Status de pago al talento (PAGADO / PAGO PARCIAL / PENDIENTE)."""
+    if f is None:
+        return badge("bd", "—")
+    spt = f.get("status_pago_talento", "")
+    if spt == "PAGADO":
+        return badge("bg", "PAGADO")
+    elif spt == "PAGO PARCIAL":
+        return badge("by", "PAGO PARCIAL")
+    elif spt == "PENDIENTE":
+        return badge("br", "PENDIENTE")
+    elif spt == "Sin OC":
+        return badge("bd", "Sin OC")
+    return badge("bd", "—")
+
+
+def _render_pct_talento_real_cell(f):
+    """Celda: % del talento por contrato (ROSTER o 80% artístico)."""
+    if f is None:
+        return badge("bd", "—")
+    lbl = f.get("pct_talento_real_label", "—")
+    if lbl and lbl != "—":
+        return f'<span class="pct">{lbl}</span>'
+    return badge("bd", "—")
+
+
+# ══════════════════════════════════════════════════════════════
+# RENDER PUBLICADOS
+# ══════════════════════════════════════════════════════════════
 
 def render_published(published, finance_by_so=None):
     if not published:
@@ -658,11 +790,14 @@ def render_published(published, finance_by_so=None):
               <td><span class="sm">{get_marca(so)}</span></td>
               <td><span class="sm">{get_campana(so)}</span></td>
               <td>{badge("bd", get_currency(so))}</td>
-              <td class="amt">{fmt_num(it.get("line_price") or so.get("amount_untaxed"))}</td>
+              <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
               <td><span class="dv">{fmt_date(t["x_studio_fecha_de_publicacin"]) or "—"}</span></td>
               <td><span class="pt">{pais or "—"}</span></td>
               <td>{_render_fact_cobro_cell(f_dat)}</td>
               <td>{_render_pago_talento_cell(f_dat)}</td>
+              <td>{_render_fecha_est_pago_cell(f_dat)}</td>
+              <td>{_render_status_pago_talento_cell(f_dat)}</td>
+              <td>{_render_pct_talento_real_cell(f_dat)}</td>
             </tr>"""
 
         html += f"""
@@ -676,12 +811,17 @@ def render_published(published, finance_by_so=None):
               <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
               <th>Moneda</th><th class="r">Neto</th><th>Publicación</th><th>País campaña</th>
               <th>Fact. / Cobro</th><th>Pago talento</th>
+              <th>Fecha est. pago</th><th>Status pago talento</th><th>% Talento</th>
             </tr></thead>
             <tbody>{rows}</tbody>
           </table></div></div>
         </div>"""
     return html
 
+
+# ══════════════════════════════════════════════════════════════
+# RENDER PENDIENTES
+# ══════════════════════════════════════════════════════════════
 
 def render_pending(pending, finance_by_so=None):
     if not pending:
@@ -703,11 +843,14 @@ def render_pending(pending, finance_by_so=None):
           <td><span class="sm">{get_marca(so)}</span></td>
           <td><span class="sm">{get_campana(so)}</span></td>
           <td>{badge("bd", get_currency(so))}</td>
-          <td class="amt">{fmt_num(it.get("line_price") or so.get("amount_untaxed"))}</td>
+          <td class="amt">{fmt_num(so.get("amount_untaxed"))}</td>
           <td>{est_html}</td>
           <td><span class="pt">{pais or "—"}</span></td>
           <td>{_render_fact_cobro_cell(f_dat)}</td>
           <td>{_render_pago_talento_cell(f_dat)}</td>
+          <td>{_render_fecha_est_pago_cell(f_dat)}</td>
+          <td>{_render_status_pago_talento_cell(f_dat)}</td>
+          <td>{_render_pct_talento_real_cell(f_dat)}</td>
         </tr>"""
 
     return f"""<div class="tw"><table>
@@ -715,10 +858,15 @@ def render_pending(pending, finance_by_so=None):
         <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
         <th>Moneda</th><th class="r">Neto</th><th>Fecha estimada</th><th>País campaña</th>
         <th>Fact. / Cobro</th><th>Pago talento</th>
+        <th>Fecha est. pago</th><th>Status pago talento</th><th>% Talento</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
 
+
+# ══════════════════════════════════════════════════════════════
+# RENDER FINANZAS
+# ══════════════════════════════════════════════════════════════
 
 def render_finance(finance):
     if not finance:
@@ -739,9 +887,8 @@ def render_finance(finance):
         so = f["so"]
 
         fs = f["factura_status"]
-        fact_h = (badge("bd", "Canje")             if fs == "canje"
-                  else badge("by", "Pendiente factura") if fs == "pendiente_factura"
-                  else badge("bg", "✓ 100%")            if fs == "100"
+        fact_h = (badge("by", "Pendiente factura") if fs == "pendiente_factura"
+                  else badge("bg", "✓ 100%") if fs == "100"
                   else badge("by", f"{fs} facturado"))
 
         venc_h  = (f'<span class="dv">{f["vencimiento"]}</span>' if f["vencimiento"]
@@ -775,8 +922,18 @@ def render_finance(finance):
         pais_txt = f["pais"] or "—"
         pais_h   = f'<span class="pt">{pais_txt}</span>'
 
-        # data-v para "Fact. cliente": almacenar el pct_fact numérico para filtro condicional
-        fact_data_v = str(f["pct_fact"]) if fs not in ("pendiente_factura", "canje") else fs
+        fact_data_v = str(f["pct_fact"]) if fs not in ("pendiente_factura",) else "pendiente_factura"
+
+        # ── Nuevas celdas ──────────────────────────────────────────────────
+        fep_h = _render_fecha_est_pago_cell(f)
+        spt_h = _render_status_pago_talento_cell(f)
+        ptr_h = _render_pct_talento_real_cell(f)
+
+        spt_val = f.get("status_pago_talento", "")
+        ptr_val = f.get("pct_talento_real_label", "—")
+        fep_val = f.get("fecha_est_pago", "")
+        if fep_val == "Pendiente facturar":
+            fep_val = "Pendiente facturar"
 
         rows += f"""<tr>
           <td data-v="{so["name"]}"><span class="num">{so["name"]}</span></td>
@@ -793,9 +950,12 @@ def render_finance(finance):
           <td class="amt" data-v="{f["pct_talento"]}">{pct_h}</td>
           <td data-v="{f["v_status"] or ""}">{pago_h}</td>
           <td data-v="{pais_txt}">{pais_h}</td>
+          <td data-v="{fep_val}">{fep_h}</td>
+          <td data-v="{ptr_val}">{ptr_h}</td>
+          <td data-v="{spt_val}">{spt_h}</td>
         </tr>"""
 
-    # ── MEJORA 1: filtro condicional para Fact. cliente ──────────────────────
+    # Filtros — col 16 = Status pago talento (nueva)
     table = f"""<div class="tw">
       <div class="fbar" id="fbar">
         <span class="flab">Filtrar:</span>
@@ -817,7 +977,7 @@ def render_finance(finance):
               <option value="gt">&gt; mayor a</option>
               <option value="pendiente">Sin factura</option>
             </select>
-            <input class="fsel-num" type="number" min="0" max="200" placeholder="%" 
+            <input class="fsel-num" type="number" min="0" max="200" placeholder="%"
                    oninput="applyFinFilter(this.closest('.tw'))" style="display:none">
           </div>
         </div>
@@ -834,6 +994,12 @@ def render_finance(finance):
           </select>
         </div>
         <div class="fsel-wrap">
+          <label class="fsel-lbl">Status pago</label>
+          <select class="fsel" data-col="16" onchange="applyFinFilter(this.closest('.tw'))">
+            <option value="">Todos</option>
+          </select>
+        </div>
+        <div class="fsel-wrap">
           <label class="fsel-lbl">País campaña</label>
           <select class="fsel" data-col="13" onchange="applyFinFilter(this.closest('.tw'))">
             <option value="">Todos</option>
@@ -847,12 +1013,17 @@ def render_finance(finance):
         <th class="r">Neto</th><th>Fact/Boleta</th><th>Fact. cliente</th><th>Vencimiento</th>
         <th>Cobro 100%</th><th class="r">Fact. proveedor</th>
         <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th><th>País campaña</th>
+        <th>Fecha est. pago</th><th>% del talento</th><th>Status pago talento</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
 
     return summary + table
 
+
+# ══════════════════════════════════════════════════════════════
+# CSS
+# ══════════════════════════════════════════════════════════════
 
 CSS = r"""
 :root{
@@ -871,6 +1042,7 @@ body{background:var(--bg);color:var(--tx);font-family:var(--sa);font-size:13px;m
 .lt{font-size:15px;font-weight:600;letter-spacing:-.3px}
 .ls{font-size:10px;color:var(--mu);font-family:var(--mo);letter-spacing:.8px}
 .lu{font-family:var(--mo);font-size:11px;color:var(--di)}
+.hdr-right{display:flex;align-items:center;gap:14px}
 .ts{padding:16px 32px;border-bottom:1px solid var(--br)}
 .tl{font-size:10px;font-family:var(--mo);letter-spacing:1.2px;color:var(--mu);text-transform:uppercase;margin-bottom:10px}
 .sw{position:relative;max-width:280px;margin-bottom:10px}
@@ -971,30 +1143,16 @@ tr.fin-hidden{display:none}
 .exp-wrap{position:relative}
 .exp-btn{background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 14px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.15s;display:flex;align-items:center;gap:6px}
 .exp-btn:hover{border-color:var(--ac);color:var(--ac)}
+.exp-btn.all-btn{border-color:var(--ac);color:var(--ac);background:rgba(77,255,195,.07)}
+.exp-btn.all-btn:hover{background:rgba(77,255,195,.15)}
 .exp-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);background:var(--sf2);border:1px solid var(--br2);border-radius:8px;min-width:170px;z-index:20;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.4)}
 .exp-item{padding:10px 14px;font-size:12.5px;cursor:pointer;transition:.12s;white-space:nowrap}
 .exp-item:hover{background:var(--sf);color:var(--ac)}
-
-/* ── EXPORTAR MASIVO ── */
-.bulk-btn{background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 16px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
-.bulk-btn:hover{border-color:var(--ac);color:var(--ac)}
-.bm-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;align-items:center;justify-content:center}
-.bm-box{background:var(--sf);border:1px solid var(--br2);border-radius:14px;padding:28px;width:580px;max-width:95vw;max-height:88vh;overflow:auto;box-shadow:0 16px 48px rgba(0,0,0,.5)}
-.bm-title{font-size:14px;font-weight:600;color:var(--tx);letter-spacing:.3px}
-.bm-section-label{font-size:10px;font-family:var(--mo);letter-spacing:.7px;text-transform:uppercase;color:var(--mu);margin-bottom:10px}
-.bm-talent-list{max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:3px;border:1px solid var(--br);border-radius:8px;padding:8px}
-.bm-cb{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:5px;font-size:12.5px;color:var(--tx);cursor:pointer;transition:.1s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bm-cb:hover{background:var(--sf2)}
-.bm-cb input[type=checkbox]{accent-color:var(--ac);width:14px;height:14px;flex-shrink:0;cursor:pointer}
-.bm-small-btn{background:transparent;border:1px solid var(--br2);color:var(--mu);padding:4px 10px;border-radius:6px;font-size:11px;font-family:var(--mo);cursor:pointer;transition:.15s}
-.bm-small-btn:hover{border-color:var(--ac);color:var(--ac)}
-.bm-action-btn{padding:9px 20px;border-radius:8px;font-family:var(--sa);font-size:13px;font-weight:500;cursor:pointer;transition:.15s;border:1px solid var(--br2);background:var(--sf2);color:var(--tx)}
-.bm-action-btn:hover{border-color:var(--ac);color:var(--ac)}
-.bm-action-btn.primary{background:var(--ac);color:#000;border-color:var(--ac)}
-.bm-action-btn.primary:hover{opacity:.85}
-.bm-search{width:100%;background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 10px;border-radius:6px;font-size:12px;font-family:var(--sa);outline:none;box-sizing:border-box;margin-bottom:8px}
-.bm-search:focus{border-color:var(--ac)}
 """
+
+# ══════════════════════════════════════════════════════════════
+# JS
+# ══════════════════════════════════════════════════════════════
 
 JS = r"""
 var _dropOpen = false;
@@ -1085,7 +1243,6 @@ function populateFinFilters(tw) {
   });
 }
 
-// Muestra/oculta el input numérico según el operador elegido
 function onPctOpChange(sel) {
   var numInput = sel.closest('.pct-filter-row').querySelector('.fsel-num');
   var needsNum = sel.value && sel.value !== 'pendiente';
@@ -1095,13 +1252,11 @@ function onPctOpChange(sel) {
 }
 
 function applyFinFilter(tw) {
-  // Filtros de select normales (exacto)
   var normalFilters = [];
   tw.querySelectorAll('.fsel:not(.fsel-op)').forEach(function(sel) {
     if (sel.value) normalFilters.push({col: parseInt(sel.dataset.col), val: sel.value});
   });
 
-  // Filtro de porcentaje condicional
   var pctFilter = null;
   var opSel = tw.querySelector('.fsel-op');
   if (opSel && opSel.value) {
@@ -1115,22 +1270,19 @@ function applyFinFilter(tw) {
   }
 
   tw.querySelectorAll('tbody tr').forEach(function(tr) {
-    // Evaluar filtros normales
     var show = normalFilters.every(function(f) {
       var td = tr.cells[f.col];
       return td && (td.dataset.v || '') === f.val;
     });
 
-    // Evaluar filtro de porcentaje
     if (show && pctFilter) {
-      var td = tr.cells[6]; // columna Fact. cliente
+      var td = tr.cells[6];
       var rawVal = td ? (td.dataset.v || '') : '';
       if (pctFilter.type === 'pendiente') {
         show = rawVal === 'pendiente_factura';
       } else {
-        // Es numérico: si la celda es "pendiente_factura", "canje" o "100"
-        var cellNum = (rawVal === '100') ? 100
-          : (rawVal === 'pendiente_factura' || rawVal === 'canje') ? NaN
+        var cellNum = (rawVal === '100' || rawVal === 'pendiente_factura')
+          ? (rawVal === '100' ? 100 : NaN)
           : parseFloat(rawVal);
         if (isNaN(cellNum)) {
           show = false;
@@ -1159,7 +1311,7 @@ function clearFinFilters(tw) {
   tw.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.remove('fin-hidden'); });
 }
 
-// ── EXPORTAR (Excel / PDF) ────────────────────────────────────────────
+// ── EXPORTAR individual (Excel / PDF) ─────────────────────────────────
 function toggleExportMenu(id) {
   document.querySelectorAll('.exp-menu').forEach(function(m) {
     if (m.id !== id + '-expmenu') m.style.display = 'none';
@@ -1180,9 +1332,6 @@ function getSelectedTalentName() {
   return (!name || name === 'Seleccioná un talento...') ? '' : name;
 }
 
-// Junta filas visibles del panel activo (respeta el talento seleccionado y
-// cualquier filtro de la solapa Finanzas -filas marcadas fin-hidden se excluyen-).
-// En Publicados, si hay varios grupos por mes, se agrega una columna "Mes".
 function collectPanelData(panelId) {
   var content = document.getElementById(panelId + '-content');
   if (!content) return {header: [], rows: []};
@@ -1260,168 +1409,100 @@ function exportPDF(panelId, sheetName) {
   toggleExportMenu(panelId);
 }
 
-
-// ── EXPORTAR MASIVO ──────────────────────────────────────────────
-var _BULK_TAB_MAP = [
-  {cls: 'tp', name: 'Publicados'},
-  {cls: 'te', name: 'Pendientes'},
-  {cls: 'tf', name: 'Finanzas'}
-];
-
-function openBulkModal() {
-  var talents = Array.from(document.querySelectorAll('#data .td'))
-    .map(function(el) { return el.dataset.t; })
-    .sort(function(a,b) { return a.localeCompare(b,'es'); });
-  var html = talents.map(function(t) {
-    var esc = t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    return '<label class="bm-cb"><input type="checkbox" class="bm-talent-cb" value="' + esc + '" checked> ' + esc + '</label>';
-  }).join('');
-  document.getElementById('bm-talent-list').innerHTML = html;
-  document.getElementById('bulk-modal').style.display = 'flex';
-}
-
-function closeBulkModal() {
-  document.getElementById('bulk-modal').style.display = 'none';
-}
-
-function bmSelectAll(checked) {
-  document.querySelectorAll('.bm-talent-cb').forEach(function(cb) { cb.checked = checked; });
-}
-
-function bmFilterTalents(q) {
-  document.querySelectorAll('.bm-talent-cb').forEach(function(cb) {
-    var label = cb.closest('label');
-    if (label) label.style.display = cb.value.toLowerCase().indexOf(q.toLowerCase()) >= 0 ? '' : 'none';
-  });
-}
-
-function _bmGetTalents() {
-  return Array.from(document.querySelectorAll('.bm-talent-cb:checked')).map(function(cb) { return cb.value; });
-}
-
-function _bmGetTabs() {
-  return Array.from(document.querySelectorAll('.bm-tab-cb:checked')).map(function(cb) { return cb.value; });
-}
-
-function _bmCollectData(talentName, panelCls) {
-  var esc = talentName.replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-  var sec = document.querySelector('#data .td[data-t="' + esc + '"]');
-  if (!sec) return {header: [], rows: []};
-  var content = sec.querySelector('.' + panelCls);
-  if (!content) return {header: [], rows: []};
-
-  var groups = content.querySelectorAll('.mg');
-  var header = [], rows = [];
-
-  if (groups.length) {
-    groups.forEach(function(g) {
-      var mtEl = g.querySelector('.mt');
-      var mes = mtEl ? (mtEl.childNodes[0].textContent || '').trim() : '';
-      var table = g.querySelector('table');
-      if (!table) return;
-      if (!header.length) {
-        header = ['Mes'];
-        table.querySelectorAll('thead th').forEach(function(th) { header.push(th.textContent.trim()); });
-      }
-      table.querySelectorAll('tbody tr').forEach(function(tr) {
-        if (tr.classList.contains('fin-hidden')) return;
-        var row = [mes];
-        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
-        rows.push(row);
-      });
-    });
-  } else {
-    var table = content.querySelector('table');
-    if (table) {
-      table.querySelectorAll('thead th').forEach(function(th) { header.push(th.textContent.trim()); });
-      table.querySelectorAll('tbody tr').forEach(function(tr) {
-        if (tr.classList.contains('fin-hidden')) return;
-        var row = [];
-        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
-        rows.push(row);
-      });
-    }
-  }
-  return {header: header, rows: rows};
-}
-
-function bulkExportExcel() {
-  var talents = _bmGetTalents();
-  var tabs    = _bmGetTabs();
-  if (!talents.length || !tabs.length) { alert('Seleccioná al menos un talento y una solapa.'); return; }
+// ── EXPORTAR MASIVO — todos los talentos en un solo Excel ─────────────
+function exportAllExcel() {
   if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel. Revisá tu conexión a internet.'); return; }
 
-  var date = new Date().toISOString().slice(0,10);
-  var exported = 0;
+  var pubData  = {header: [], rows: []};
+  var pendData = {header: [], rows: []};
+  var finData  = {header: [], rows: []};
 
-  talents.forEach(function(talent) {
-    var wb = XLSX.utils.book_new();
+  document.querySelectorAll('#data .td').forEach(function(sec) {
+    var talent = sec.dataset.t;
 
-    tabs.forEach(function(tabCls) {
-      var tab = _BULK_TAB_MAP.find(function(t) { return t.cls === tabCls; });
-      if (!tab) return;
-      var data = _bmCollectData(talent, tab.cls);
-      if (!data.rows.length) return;
-      var aoa = [data.header].concat(data.rows);
-      var ws = XLSX.utils.aoa_to_sheet(aoa);
-      XLSX.utils.book_append_sheet(wb, ws, tab.name);
-    });
+    // ── PUBLICADOS (grupos por mes) ──────────────────────────────────
+    var pubGroups = sec.querySelectorAll('.tp .mg');
+    if (pubGroups.length) {
+      pubGroups.forEach(function(g) {
+        var table = g.querySelector('table');
+        if (!table) return;
+        if (!pubData.header.length) {
+          pubData.header = ['Talento', 'Mes'];
+          table.querySelectorAll('thead th').forEach(function(th) {
+            pubData.header.push(th.textContent.trim());
+          });
+        }
+        var mtEl = g.querySelector('.mt');
+        var mes = mtEl ? (mtEl.childNodes[0].textContent || '').trim() : '';
+        table.querySelectorAll('tbody tr').forEach(function(tr) {
+          var row = [talent, mes];
+          tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
+          pubData.rows.push(row);
+        });
+      });
+    }
 
-    if (wb.SheetNames.length) {
-      XLSX.writeFile(wb, talent + ' - ' + date + '.xlsx');
-      exported++;
+    // ── PENDIENTES ───────────────────────────────────────────────────
+    var pendTable = sec.querySelector('.te table');
+    if (pendTable) {
+      if (!pendData.header.length) {
+        pendData.header = ['Talento'];
+        pendTable.querySelectorAll('thead th').forEach(function(th) {
+          pendData.header.push(th.textContent.trim());
+        });
+      }
+      pendTable.querySelectorAll('tbody tr').forEach(function(tr) {
+        var row = [talent];
+        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
+        pendData.rows.push(row);
+      });
+    }
+
+    // ── FINANZAS ─────────────────────────────────────────────────────
+    var finTable = sec.querySelector('.tf table');
+    if (finTable) {
+      if (!finData.header.length) {
+        finData.header = ['Talento'];
+        finTable.querySelectorAll('thead th').forEach(function(th) {
+          finData.header.push(th.textContent.trim());
+        });
+      }
+      finTable.querySelectorAll('tbody tr').forEach(function(tr) {
+        var row = [talent];
+        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
+        finData.rows.push(row);
+      });
     }
   });
 
-  if (!exported) { alert('No hay datos para exportar en la selección realizada.'); return; }
-  closeBulkModal();
+  if (!pubData.rows.length && !pendData.rows.length && !finData.rows.length) {
+    alert('No hay datos para exportar.');
+    return;
+  }
+
+  var wb = XLSX.utils.book_new();
+  if (pubData.rows.length) {
+    var ws1 = XLSX.utils.aoa_to_sheet([pubData.header].concat(pubData.rows));
+    XLSX.utils.book_append_sheet(wb, ws1, 'Publicados');
+  }
+  if (pendData.rows.length) {
+    var ws2 = XLSX.utils.aoa_to_sheet([pendData.header].concat(pendData.rows));
+    XLSX.utils.book_append_sheet(wb, ws2, 'Pendientes');
+  }
+  if (finData.rows.length) {
+    var ws3 = XLSX.utils.aoa_to_sheet([finData.header].concat(finData.rows));
+    XLSX.utils.book_append_sheet(wb, ws3, 'Finanzas');
+  }
+
+  var fecha = new Date().toLocaleDateString('es-AR').replace(/\//g, '-');
+  XLSX.writeFile(wb, 'Dashboard ZAS - ' + fecha + '.xlsx');
 }
-
-function bulkExportPDF() {
-  var talents = _bmGetTalents();
-  var tabs    = _bmGetTabs();
-  if (!talents.length || !tabs.length) { alert('Seleccioná al menos un talento y una solapa.'); return; }
-  if (typeof window.jspdf === 'undefined') { alert('No se pudo cargar el módulo de PDF. Revisá tu conexión a internet.'); return; }
-
-  var doc = new window.jspdf.jsPDF({orientation: 'landscape', unit: 'pt', format: 'a4'});
-  var dateStr = new Date().toLocaleString('es-AR');
-  var isFirst = true;
-
-  talents.forEach(function(talent) {
-    tabs.forEach(function(tabCls) {
-      var tab = _BULK_TAB_MAP.find(function(t) { return t.cls === tabCls; });
-      if (!tab) return;
-      var data = _bmCollectData(talent, tab.cls);
-      if (!data.rows.length) return;
-
-      if (!isFirst) doc.addPage();
-      isFirst = false;
-
-      doc.setFontSize(13);
-      doc.text(talent + ' — ' + tab.name, 30, 28);
-      doc.setFontSize(8);
-      doc.text('Generado: ' + dateStr, 30, 42);
-      doc.autoTable({
-        head: [data.header],
-        body: data.rows,
-        startY: 52,
-        styles: {fontSize: 6.5, cellPadding: 3},
-        headStyles: {fillColor: [20, 22, 33]},
-        margin: {left: 30, right: 30}
-      });
-    });
-  });
-
-  if (isFirst) { alert('No hay datos para exportar en la selección realizada.'); return; }
-  doc.save('Export Masivo ' + new Date().toISOString().slice(0,10) + '.pdf');
-  closeBulkModal();
-}
-
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') closeBulkModal();
-});
 """
 
+
+# ══════════════════════════════════════════════════════════════
+# GENERAR HTML
+# ══════════════════════════════════════════════════════════════
 
 def generar_html(talentos):
     now = datetime.now().strftime("%d/%m/%Y %H:%M")
@@ -1444,12 +1525,6 @@ def generar_html(talentos):
   <div class="tf">{render_finance(data["finance"])}</div>
 </div>"""
 
-    # Wire up the pct operator select — needs to call onPctOpChange
-    # We inject the onchange directly in the HTML template above (render_finance),
-    # but since it's generated once per talent and reused, the fsel-op already has
-    # onchange="applyFinFilter(...)" — we override it here via a global delegated listener
-    # added in the JS block below.
-
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1468,7 +1543,10 @@ def generar_html(talentos):
     <div class="lm">ZAS</div>
     <div><div class="lt">Seguimiento de Talentos</div><div class="ls">FINANZAS · ODOO</div></div>
   </div>
-  <span class="lu">Generado: {now}</span>
+  <div class="hdr-right">
+    <button class="exp-btn all-btn" onclick="exportAllExcel()">⬇ Descargar todo (Excel)</button>
+    <span class="lu">Generado: {now}</span>
+  </div>
 </div>
 <div class="ts">
   <div class="tl">Talento</div>
@@ -1487,13 +1565,10 @@ def generar_html(talentos):
     </div>
   </div>
 </div>
-<div class="tbar" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-  <div style="display:flex">
-    <button class="tb active" data-tab="p" onclick="st('p',this)">Publicados <span class="tc" id="cp">—</span></button>
-    <button class="tb" data-tab="e" onclick="st('e',this)">Pendientes <span class="tc" id="ce">—</span></button>
-    <button class="tb" data-tab="f" onclick="st('f',this)">Finanzas <span class="tc" id="cf">—</span></button>
-  </div>
-  <button class="bulk-btn" onclick="openBulkModal()">&#11015; Exportar Masivo</button>
+<div class="tbar">
+  <button class="tb active" data-tab="p" onclick="st('p',this)">Publicados <span class="tc" id="cp">—</span></button>
+  <button class="tb" data-tab="e" onclick="st('e',this)">Pendientes <span class="tc" id="ce">—</span></button>
+  <button class="tb" data-tab="f" onclick="st('f',this)">Finanzas <span class="tc" id="cf">—</span></button>
 </div>
 <div class="main">
   <div class="panel active" id="pp">
@@ -1533,38 +1608,6 @@ def generar_html(talentos):
     <div id="pf-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
   </div>
 </div>
-<div id="bulk-modal" class="bm-overlay">
-  <div class="bm-box">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:22px">
-      <div class="bm-title">Exportar Masivo</div>
-      <button onclick="closeBulkModal()" style="background:transparent;border:none;color:var(--mu);font-size:18px;cursor:pointer;line-height:1">&#x2715;</button>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
-      <div>
-        <div class="bm-section-label">Influencers</div>
-        <input class="bm-search" type="text" placeholder="Buscar influencer..." oninput="bmFilterTalents(this.value)">
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <button class="bm-small-btn" onclick="bmSelectAll(true)">Todos</button>
-          <button class="bm-small-btn" onclick="bmSelectAll(false)">Ninguno</button>
-        </div>
-        <div id="bm-talent-list" class="bm-talent-list"></div>
-      </div>
-      <div>
-        <div class="bm-section-label">Solapas</div>
-        <div style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
-          <label class="bm-cb"><input type="checkbox" class="bm-tab-cb" value="tp" checked> Publicados</label>
-          <label class="bm-cb"><input type="checkbox" class="bm-tab-cb" value="te" checked> Pendientes</label>
-          <label class="bm-cb"><input type="checkbox" class="bm-tab-cb" value="tf" checked> Finanzas</label>
-        </div>
-      </div>
-    </div>
-    <div style="display:flex;gap:10px;margin-top:26px;justify-content:flex-end;border-top:1px solid var(--br);padding-top:18px">
-      <button class="bm-action-btn" onclick="closeBulkModal()">Cancelar</button>
-      <button class="bm-action-btn" onclick="bulkExportExcel()">&#128202; Excel (.xlsx)</button>
-      <button class="bm-action-btn primary" onclick="bulkExportPDF()">&#128196; PDF</button>
-    </div>
-  </div>
-</div>
 <div style="display:none" id="data">{sections}</div>
 <script>{JS}
 // Delegated listener para el selector de operador de porcentaje
@@ -1578,29 +1621,26 @@ document.addEventListener('change', function(e) {{
 </html>"""
 
 
+# ══════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     print("=" * 55)
     print("  Dashboard Talentos ZAS")
     print("=" * 55)
     try:
-        talent_names, subtareas, task_talent_map, task_price_map, so_map, \
+        print("\nCargando ROSTER...")
+        roster = cargar_roster()
+
+        talent_names, subtareas, task_talent_map, so_map, \
             client_inv_map, po_map, vendor_inv_map = bajar_datos()
 
         print("\nConstruyendo datos...")
-        talentos = construir_datos(talent_names, subtareas, task_talent_map, task_price_map,
-                                   so_map, client_inv_map, po_map, vendor_inv_map)
+        talentos = construir_datos(talent_names, subtareas, task_talent_map,
+                                   so_map, client_inv_map, po_map, vendor_inv_map,
+                                   roster=roster)
         print(f"  ✓ {len(talentos)} talentos con datos")
-
-        # Aplicar alias: fusionar datos de talentos con nombre alternativo
-        for alias, canonical in TALENT_ALIASES.items():
-            if alias in talentos:
-                if canonical in talentos:
-                    for k in ["published", "pending", "finance"]:
-                        talentos[canonical][k].extend(talentos[alias][k])
-                    talentos[canonical]["finance_by_so"].update(talentos[alias]["finance_by_so"])
-                else:
-                    talentos[canonical] = talentos[alias]
-                del talentos[alias]
 
         print("\nGenerando HTML...")
         html = generar_html(talentos)
