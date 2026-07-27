@@ -170,6 +170,18 @@ def es_venta_artistica(so):
     return tipo_str in ARTISTIC_CONTRACT_TYPES or "artis" in tipo_str
 
 
+def get_tipo_contrato(so):
+    """Devuelve el tipo de contrato como texto legible."""
+    if not so:
+        return "—"
+    tipo = so.get("x_studio_tipo_de_contrato")
+    if not tipo or tipo is False:
+        return "—"
+    if isinstance(tipo, (list, tuple)):
+        tipo = tipo[1] if len(tipo) > 1 else str(tipo[0])
+    return str(tipo).strip() or "—"
+
+
 # ══════════════════════════════════════════════════════════════
 # ODOO
 # ══════════════════════════════════════════════════════════════
@@ -778,6 +790,13 @@ def render_published(published, finance_by_so=None):
             tots[get_currency(it["so"])] += it["so"].get("amount_untaxed") or 0
         tot_str = "  ·  ".join(f"{c} {fmt_num(v)}" for c, v in tots.items())
 
+        # Fecha de exportación: "1/M/YYYY" (ej: 1/1/2026)
+        try:
+            _y, _m = mk.split("-")
+            export_mes = f"1/{int(_m)}/{_y}"
+        except Exception:
+            export_mes = ml
+
         rows = ""
         for it in items:
             t, so = it["task"], it["so"]
@@ -798,12 +817,13 @@ def render_published(published, finance_by_so=None):
               <td>{_render_fecha_est_pago_cell(f_dat)}</td>
               <td>{_render_status_pago_talento_cell(f_dat)}</td>
               <td>{_render_pct_talento_real_cell(f_dat)}</td>
+              <td><span class="sm">{get_tipo_contrato(so)}</span></td>
             </tr>"""
 
         html += f"""
         <div class="mg" id="{gid}">
           <div class="mh" onclick="tog('{gid}')">
-            <div class="mt">{ml.capitalize()} {badge("bd", f"{len(items)} cont.")}</div>
+            <div class="mt" data-mes="{export_mes}">{ml.capitalize()} {badge("bd", f"{len(items)} cont.")}</div>
             <div class="ms">{tot_str} <span class="chv">▾</span></div>
           </div>
           <div class="mb"><div class="tw"><table>
@@ -811,7 +831,7 @@ def render_published(published, finance_by_so=None):
               <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
               <th>Moneda</th><th class="r">Neto</th><th>Publicación</th><th>País campaña</th>
               <th>Fact. / Cobro</th><th>Pago talento</th>
-              <th>Fecha est. pago</th><th>Status pago talento</th><th>% Talento</th>
+              <th>Fecha est. pago</th><th>Status pago talento</th><th>% Talento</th><th>Tipo contrato</th>
             </tr></thead>
             <tbody>{rows}</tbody>
           </table></div></div>
@@ -851,6 +871,7 @@ def render_pending(pending, finance_by_so=None):
           <td>{_render_fecha_est_pago_cell(f_dat)}</td>
           <td>{_render_status_pago_talento_cell(f_dat)}</td>
           <td>{_render_pct_talento_real_cell(f_dat)}</td>
+          <td><span class="sm">{get_tipo_contrato(so)}</span></td>
         </tr>"""
 
     return f"""<div class="tw"><table>
@@ -858,7 +879,7 @@ def render_pending(pending, finance_by_so=None):
         <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
         <th>Moneda</th><th class="r">Neto</th><th>Fecha estimada</th><th>País campaña</th>
         <th>Fact. / Cobro</th><th>Pago talento</th>
-        <th>Fecha est. pago</th><th>Status pago talento</th><th>% Talento</th>
+        <th>Fecha est. pago</th><th>Status pago talento</th><th>% Talento</th><th>Tipo contrato</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
@@ -929,11 +950,12 @@ def render_finance(finance):
         spt_h = _render_status_pago_talento_cell(f)
         ptr_h = _render_pct_talento_real_cell(f)
 
-        spt_val = f.get("status_pago_talento", "")
-        ptr_val = f.get("pct_talento_real_label", "—")
-        fep_val = f.get("fecha_est_pago", "")
+        spt_val  = f.get("status_pago_talento", "")
+        ptr_val  = f.get("pct_talento_real_label", "—")
+        fep_val  = f.get("fecha_est_pago", "")
         if fep_val == "Pendiente facturar":
             fep_val = "Pendiente facturar"
+        tipo_txt = get_tipo_contrato(so)
 
         rows += f"""<tr>
           <td data-v="{so["name"]}"><span class="num">{so["name"]}</span></td>
@@ -953,6 +975,7 @@ def render_finance(finance):
           <td data-v="{fep_val}">{fep_h}</td>
           <td data-v="{ptr_val}">{ptr_h}</td>
           <td data-v="{spt_val}">{spt_h}</td>
+          <td data-v="{tipo_txt}"><span class="sm">{tipo_txt}</span></td>
         </tr>"""
 
     # Filtros — col 16 = Status pago talento (nueva)
@@ -1013,7 +1036,7 @@ def render_finance(finance):
         <th class="r">Neto</th><th>Fact/Boleta</th><th>Fact. cliente</th><th>Vencimiento</th>
         <th>Cobro 100%</th><th class="r">Fact. proveedor</th>
         <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th><th>País campaña</th>
-        <th>Fecha est. pago</th><th>% del talento</th><th>Status pago talento</th>
+        <th>Fecha est. pago</th><th>% del talento</th><th>Status pago talento</th><th>Tipo contrato</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
@@ -1343,7 +1366,7 @@ function collectPanelData(panelId) {
   if (groups.length) {
     groups.forEach(function(g) {
       var mtEl = g.querySelector('.mt');
-      var mes = mtEl ? (mtEl.childNodes[0].textContent || '').trim() : '';
+      var mes = mtEl ? (mtEl.dataset.mes || (mtEl.childNodes[0].textContent || '').trim()) : '';
       var table = g.querySelector('table');
       if (!table) return;
       if (!header.length) {
@@ -1433,7 +1456,7 @@ function exportAllExcel() {
           });
         }
         var mtEl = g.querySelector('.mt');
-        var mes = mtEl ? (mtEl.childNodes[0].textContent || '').trim() : '';
+        var mes = mtEl ? (mtEl.dataset.mes || (mtEl.childNodes[0].textContent || '').trim()) : '';
         table.querySelectorAll('tbody tr').forEach(function(tr) {
           var row = [talent, mes];
           tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
