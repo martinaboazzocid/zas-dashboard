@@ -42,6 +42,9 @@ VENDOR_REFUND_TYPES = ("in_refund",)
 # Contratos artisticos: el talento se lleva SIEMPRE el 80%, sin mirar el roster.
 ARTISTIC_CONTRACT_TYPES = {"artistico", "artistic", "artisticos"}
 ARTISTIC_TALENT_SHARE = 0.80
+
+# En la planilla de pagos se toman todas las filas menos las rechazadas.
+STATUS_EXCLUIDOS = ("rechazad", "anulad", "cancelad")
 INFORME_DESDE_ANIO = 2026   # el Informe Mensual solo toma ventas de este anio en adelante
 
 PAIS_LABELS = {
@@ -333,8 +336,9 @@ def bajar_datos():
     for so in sale_orders:
         moneda_venta[(so.get("name") or "").strip().upper()] = get_currency(so)
 
+    # {venta: {moneda: monto}} — la moneda importa: una tarifa en ARS pagada en
+    # USD no se puede comparar contra el costo esperado.
     pago_odoo_map = {}
-    ventas_otra_moneda = set()
     for inv_id, pesos in peso_por_factura.items():
         inv = factura_obj[inv_id]
         if inv.get("payment_state") not in ("paid", "in_payment"):
@@ -346,28 +350,29 @@ def bajar_datos():
             base = -base
 
         cur_inv = inv.get("currency_id")
-        cur_inv = (cur_inv[1] if isinstance(cur_inv, (list, tuple)) else str(cur_inv or "")).strip()
+        cur_inv = (cur_inv[1] if isinstance(cur_inv, (list, tuple))
+                   else str(cur_inv or "")).strip().upper()
 
         suma = sum(pesos.values())
         for venta, peso in pesos.items():
-            # Tarifa en ARS pero pago al talento en USD: comparar los montos no
-            # tiene sentido, se marca la venta para tomar el dato de la planilla.
-            if cur_inv and moneda_venta.get(venta) and cur_inv != moneda_venta[venta]:
-                ventas_otra_moneda.add(venta)
             parte = base * (peso / suma) if suma > 0 else base / len(pesos)
-            pago_odoo_map[venta] = pago_odoo_map.get(venta, 0) + parte
+            por_moneda = pago_odoo_map.setdefault(venta, {})
+            por_moneda[cur_inv] = por_moneda.get(cur_inv, 0) + parte
 
-    pago_odoo_map = {k: v for k, v in pago_odoo_map.items() if v}
-    if ventas_otra_moneda:
-        print(f"    {len(ventas_otra_moneda)} ventas con pago en moneda distinta "
-              f"(se toma el monto de la planilla)")
+    pago_odoo_map = {k: {c: v for c, v in d.items() if v}
+                     for k, d in pago_odoo_map.items()}
+    pago_odoo_map = {k: d for k, d in pago_odoo_map.items() if d}
+
+    distintas = sum(1 for v, d in pago_odoo_map.items()
+                    if moneda_venta.get(v) and set(d) - {moneda_venta[v]})
+    if distintas:
+        print(f"    {distintas} ventas con pago en moneda distinta a la venta")
 
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
     print(f"    {len(pago_odoo_map)} ventas con pago al talento registrado en Odoo")
 
     return (talent_names, subtareas, task_talent_map, so_map, client_invoices_map,
-            po_map, vendor_invoices_map, sol_ext_map, pago_odoo_map,
-            ventas_otra_moneda)
+            po_map, vendor_invoices_map, sol_ext_map, pago_odoo_map)
 
 
 def _normalizar_nombre(nombre):
@@ -1035,8 +1040,9 @@ def cargar_pagos():
     Columns are located by NAME, not position, because the sheet layout changes:
       "ID Unico de Campana"                  -> sale order (CL02790-1 -> CL02790)
       "MONTO NETO a considerar en Campanas"  -> amount to count
-      "STATUS"                               -> only rows marked PAGADO count
-    Returns {SO_NAME: total_paid}.
+      "STATUS"                               -> every row counts except rejected
+    Returns {SO_NAME: {MONEDA: total_paid}} so amounts are only ever compared
+    against a cost in the same currency.
     """
     import csv, io
     pagos = {}
@@ -1061,12 +1067,15 @@ def cargar_pagos():
             raise RuntimeError(
                 f"no encontre las columnas necesarias. Header: {header[:20]}")
 
+        i_mon = _buscar_col(header, "moneda")
+
         usadas, sin_venta, sin_monto = 0, 0, 0
         for row in rows[1:]:
             if not row:
                 continue
+            # Se consideran todas las filas salvo las rechazadas.
             if i_stat is not None and i_stat < len(row):
-                if row[i_stat] and "pagado" not in _sin_tildes(row[i_stat]):
+                if any(k in _sin_tildes(row[i_stat]) for k in STATUS_EXCLUIDOS):
                     continue
             venta = _venta_de_id_campana(row[i_venta] if i_venta < len(row) else "")
             if not venta:
@@ -1076,12 +1085,18 @@ def cargar_pagos():
             if monto is None:
                 sin_monto += 1
                 continue
-            pagos[venta] = pagos.get(venta, 0) + monto
+            moneda = ""
+            if i_mon is not None and i_mon < len(row):
+                moneda = str(row[i_mon] or "").strip().upper()
+            por_moneda = pagos.setdefault(venta, {})
+            por_moneda[moneda] = por_moneda.get(moneda, 0) + monto
             usadas += 1
 
         print(f"    -> pagos: {len(pagos)} ventas ({usadas} filas usadas, "
               f"{sin_venta} sin ID de campana, {sin_monto} sin monto)")
-        print(f"       columnas: venta={header[i_venta]!r} monto={header[i_monto]!r}")
+        nom_mon = header[i_mon] if i_mon is not None else None
+        print(f"       columnas: venta={header[i_venta]!r} monto={header[i_monto]!r} "
+              f"moneda={nom_mon!r}")
         if not pagos:
             print(f"    ! pagos vacio. Header leido: {header[:20]}")
     except Exception as e:
@@ -1293,30 +1308,50 @@ def get_fecha_cobro_estimada(facturas):
     return fmt_date(dues[-1]) if dues else "—"
 
 
-def _pagado_de_venta(so, pago_odoo_map, pagos_map, ventas_otra_moneda=()):
-    """How much was paid to the talent, and where the figure came from.
+def _fmt_monto_moneda(monto, moneda):
+    """Format an amount keeping decimals for small figures (USD) and none for big ones."""
+    try:
+        v = float(monto)
+    except (TypeError, ValueError):
+        return f"{monto} {moneda}".strip()
+    if abs(v) < 10000 and round(v) != round(v, 2):
+        txt = f"{v:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".")
+    else:
+        txt = _fmt_informe_num(v)
+    return f"{txt} {moneda}".strip()
 
-    Returns (monto, fuente) with fuente in:
-      'odoo'        -> paid vendor bills in the same currency as the sale
-      'planilla'    -> taken from the pagos spreadsheet
-      'otra_moneda' -> paid in a different currency and not in the spreadsheet,
-                       so the amount cannot be compared
-      'ninguno'     -> no payment found
+
+def _pagado_de_venta(so, pago_odoo_map, pagos_map):
+    """How much was paid to the talent, in which currency, and from which source.
+
+    Returns (monto, fuente, moneda_pago).
+      fuente 'odoo' / 'planilla'  -> same currency as the sale, safe to compare
+      fuente 'otra_moneda'        -> paid in another currency; monto/moneda are
+                                     informative only, never compared
+      fuente 'ninguno'            -> no payment found
     """
     nombre = (so.get("name") or "").strip().upper()
-    de_planilla = pagos_map.get(nombre, 0)
+    cur_venta = (get_currency(so) or "").strip().upper()
 
-    if nombre in (ventas_otra_moneda or ()):
-        if de_planilla:
-            return de_planilla, "planilla"
-        return 0, "otra_moneda"
+    odoo = pago_odoo_map.get(nombre) or {}
+    hoja = pagos_map.get(nombre) or {}
 
-    desde_odoo = pago_odoo_map.get(nombre, 0)
-    if desde_odoo:
-        return desde_odoo, "odoo"
-    if de_planilla:
-        return de_planilla, "planilla"
-    return 0, "ninguno"
+    # 1) Same currency as the sale: comparable
+    if odoo.get(cur_venta):
+        return odoo[cur_venta], "odoo", cur_venta
+    if hoja.get(cur_venta):
+        return hoja[cur_venta], "planilla", cur_venta
+    # the spreadsheet may leave MONEDA empty; assume the sale currency
+    if hoja.get(""):
+        return hoja[""], "planilla", cur_venta
+
+    # 2) Paid, but in another currency: report it without comparing
+    for fuente, d in (("odoo", odoo), ("planilla", hoja)):
+        for cur, monto in d.items():
+            if monto:
+                return monto, "otra_moneda", cur
+
+    return 0, "ninguno", cur_venta
 
 
 def _estado_cobro(cobrado, neto):
@@ -1330,10 +1365,11 @@ def _estado_cobro(cobrado, neto):
     return "PARCIAL"
 
 
-def _estado_pago(pagado, esperado, fuente="odoo"):
+def _estado_pago(pagado, esperado, fuente="odoo", moneda=""):
     """Compare paid vs expected and return the status label."""
     if fuente == "otra_moneda":
-        return "OTRA MONEDA"
+        # No se compara: la tarifa y el pago estan en monedas distintas.
+        return f"PAGADO {_fmt_monto_moneda(pagado, moneda)}"
     if not pagado:
         return "PENDIENTE"
     if not esperado or esperado <= 0:
@@ -1348,8 +1384,7 @@ def _estado_pago(pagado, esperado, fuente="odoo"):
 
 
 def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
-                              pago_odoo_map, roster, pagos_map,
-                              ventas_otra_moneda=()):
+                              pago_odoo_map, roster, pagos_map):
     """One row per (sale order x talent), only for sales from INFORME_DESDE_ANIO on."""
     rows = []
     sin_roster = set()
@@ -1393,8 +1428,8 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
         facturas    = client_inv_map.get(so_id, [])
         cobrado_so  = get_cobrado_informe(so_id, facturas, inv_to_sos, neto_por_so)
         fecha_cobro = get_fecha_cobro_estimada(facturas)
-        pagado_so, fuente_pago = _pagado_de_venta(
-            so, pago_odoo_map, pagos_map, ventas_otra_moneda)
+        pagado_so, fuente_pago, moneda_pago = _pagado_de_venta(
+            so, pago_odoo_map, pagos_map)
 
         for talento, neto in sorted(netos.items()):
             # peso = que parte de la venta es de este talento (para prorratear
@@ -1429,8 +1464,10 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
                 "cobrado":     cobrado_talento,
                 "cobro_estado": _estado_cobro(cobrado_talento, neto),
                 "fecha_cobro": fecha_cobro or "—",
-                "pago":        _estado_pago(pagado_talento, costo, fuente_pago),
+                "pago":        _estado_pago(pagado_talento, costo,
+                                            fuente_pago, moneda_pago),
                 "pago_fuente": fuente_pago,
+                "pago_moneda": moneda_pago,
             })
 
     print(f"    {len(rows)} filas ({omitidas} ventas omitidas por ser previas a {INFORME_DESDE_ANIO})")
@@ -1456,8 +1493,8 @@ def render_informe_mensual(rows):
                 'esten compartidos por enlace.</div></div>')
 
     def pago_badge(p):
-        if p == "OTRA MONEDA":
-            return badge("bp", p)
+        if "PARCIAL" not in p and "EXCESO" not in p and p.startswith("PAGADO "):
+            return badge("bp", p)      # pagado en otra moneda
         if p.startswith("PAGADO"):
             return badge("bg", p)
         if "EXCESO" in p:
@@ -1471,9 +1508,9 @@ def render_informe_mensual(rows):
     def pago_titulo(r):
         f = r.get("pago_fuente")
         if f == "otra_moneda":
-            return ("Se le pago al talento en otra moneda que la de la venta, "
-                    "asi que no se pueden comparar los montos. Carga el pago en "
-                    "la planilla de pagos para que se compare.")
+            return (f"Pagado en {r.get('pago_moneda','otra moneda')} y la venta "
+                    f"esta en {r.get('moneda','otra moneda')}: se muestra el monto "
+                    f"pagado pero no se compara contra el costo del talento.")
         if f == "planilla":
             return "Monto tomado de la planilla de pagos"
         if f == "odoo":
@@ -2172,7 +2209,7 @@ if __name__ == "__main__":
     try:
         talent_names, subtareas, task_talent_map, so_map, \
             client_inv_map, po_map, vendor_inv_map, sol_ext_map, \
-            pago_odoo_map, ventas_otra_moneda = bajar_datos()
+            pago_odoo_map = bajar_datos()
 
         print("\nConstruyendo datos...")
         talentos = construir_datos(talent_names, subtareas, task_talent_map,
@@ -2186,7 +2223,7 @@ if __name__ == "__main__":
         print("\nConstruyendo Informe Mensual...")
         informe_rows = construir_informe_mensual(
             so_map, sol_ext_map, client_inv_map,
-            pago_odoo_map, roster, pagos_map, ventas_otra_moneda
+            pago_odoo_map, roster, pagos_map
         )
         print(f"  ✓ {len(informe_rows)} ventas en Informe Mensual")
 
