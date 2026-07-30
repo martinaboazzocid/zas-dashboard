@@ -38,6 +38,10 @@ CHILE_COMPANY_ID = 2
 # in_receipt (no in_invoice). Sin esto los pagos por boleta se perdian.
 VENDOR_MOVE_TYPES = ("in_invoice", "in_receipt")
 VENDOR_REFUND_TYPES = ("in_refund",)
+
+# Contratos artisticos: el talento se lleva SIEMPRE el 80%, sin mirar el roster.
+ARTISTIC_CONTRACT_TYPES = {"artistico", "artistic", "artisticos"}
+ARTISTIC_TALENT_SHARE = 0.80
 INFORME_DESDE_ANIO = 2026   # el Informe Mensual solo toma ventas de este anio en adelante
 
 PAIS_LABELS = {
@@ -1035,6 +1039,31 @@ def _get_zas_fee(roster, talent_name, date_order):
     return roster.get(key, {}).get((dt.year, dt.month))
 
 
+def _sin_tildes(txt):
+    trans = str.maketrans("áàäâãéèëêíìïîóòöôõúùüûñç", "aaaaaeeeeiiiiooooouuuunc")
+    return str(txt or "").strip().lower().translate(trans)
+
+
+def es_contrato_artistico(so):
+    """True when the sale's contract type is artistic."""
+    return _sin_tildes(so.get("x_studio_tipo_de_contrato")) in ARTISTIC_CONTRACT_TYPES
+
+
+def resolver_share_talento(so, roster, talento, date_order):
+    """Return (share_del_talento, origen).
+
+    Artistic contracts are fixed at 80% for the talent, so the roster is not
+    consulted. Everything else uses the monthly ZAS fee from the roster.
+    origen is 'artistico', 'roster' or None when there is no fee available.
+    """
+    if es_contrato_artistico(so):
+        return ARTISTIC_TALENT_SHARE, "artistico"
+    zas_fee = _get_zas_fee(roster, talento, date_order)
+    if zas_fee is None:
+        return None, None
+    return 1 - zas_fee, "roster"
+
+
 def get_zas_talento(so):
     """Return 'ZAS' or 'TALENTO' for a sale order."""
     cid = so["company_id"][0] if isinstance(so.get("company_id"), list) else so.get("company_id")
@@ -1291,10 +1320,10 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
         for talento, neto in sorted(netos.items()):
             share = (neto / neto_total) if neto_total else 0
 
-            zas_fee = _get_zas_fee(roster, talento, date_order)
-            if zas_fee is not None:
-                costo   = neto * (1 - zas_fee)
-                pct_txt = f"{_fmt_informe_num(costo)} ({round((1 - zas_fee) * 100)}%)"
+            share, origen = resolver_share_talento(so, roster, talento, date_order)
+            if share is not None:
+                costo   = neto * share
+                pct_txt = f"{_fmt_informe_num(costo)} ({round(share * 100)}%)"
             else:
                 costo   = None
                 pct_txt = "—"
@@ -1310,6 +1339,7 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
                 "moneda":      moneda,
                 "neto":        neto,
                 "costo":       costo,
+                "costo_origen": origen or "",
                 "cobrado":     cobrado_so * share,
                 "cobro_estado": _estado_cobro(cobrado_so * share, neto),
                 "fecha_cobro": fecha_cobro or "—",
@@ -1321,6 +1351,14 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
         print(f"    ! {len(sin_roster)} talentos sin fee en el roster "
               f"(ej: {', '.join(sorted(sin_roster)[:5])})")
     return rows
+
+
+def _titulo_costo(r):
+    if r.get("costo_origen") == "artistico":
+        return "Contrato artistico: 80% fijo para el talento"
+    if r.get("costo_origen") == "roster":
+        return "Fee del roster del mes de la venta"
+    return "Sin fee: el talento no figura en el roster ese mes"
 
 
 def render_informe_mensual(rows):
@@ -1355,7 +1393,7 @@ def render_informe_mensual(rows):
             f'<td>{zt_b}</td>'
             f'<td>{r["moneda"]}</td>'
             f'<td class="amt" data-v="{r["neto"]}">{_fmt_informe_num(r["neto"])}</td>'
-            f'<td class="amt">{costo}</td>'
+            f'<td class="amt" title="{_titulo_costo(r)}">{costo}</td>'
             f'<td class="amt" data-v="{r["cobro_estado"]}" title="{r["cobro_estado"]}">{cob}</td>'
             f'<td>{r["fecha_cobro"]}</td>'
             f'<td>{pago_badge(r["pago"])}</td>'
@@ -1366,10 +1404,13 @@ def render_informe_mensual(rows):
     opts = "".join(f'<option value="{t}">{t}</option>' for t in talentos)
 
     sin_fee = sum(1 for r in rows if r["costo"] is None)
+    artist  = sum(1 for r in rows if r.get("costo_origen") == "artistico")
     aviso = ""
+    if artist:
+        aviso += f'<span class="sm"> · {artist} artisticas (80%)</span>'
     if sin_fee:
-        aviso = (f'<span class="flab" style="color:var(--wn)">'
-                 f'{sin_fee} filas sin fee de roster</span>')
+        aviso += (f'<span class="flab" style="color:var(--wn)"> · '
+                  f'{sin_fee} filas sin fee de roster</span>')
 
     return (
         f'<div class="sum">Filas: <strong>{len(rows)}</strong> · '
