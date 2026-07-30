@@ -34,6 +34,10 @@ BATCH           = 500
 PAGOS_SHEET_ID   = "1XmVY5hnipn4FvTkB4_lBtVgnv3GmRLwqdAzq2CfK2Ak"
 ROSTER_SHEET_ID  = "1Pngi_fbftcKXPqCnMjCJ8hLQ7eDZ5eau7IUnNA5nk7w"
 CHILE_COMPANY_ID = 2
+# En Chile el talento factura con Boleta de Honorarios, que Odoo guarda como
+# in_receipt (no in_invoice). Sin esto los pagos por boleta se perdian.
+VENDOR_MOVE_TYPES = ("in_invoice", "in_receipt")
+VENDOR_REFUND_TYPES = ("in_refund",)
 INFORME_DESDE_ANIO = 2026   # el Informe Mensual solo toma ventas de este anio en adelante
 
 PAIS_LABELS = {
@@ -290,12 +294,41 @@ def bajar_datos():
         for po in pos_raw:
             for inv_id in (po.get("invoice_ids") or []):
                 vinv = vinv_by_id.get(inv_id)
-                if vinv and vinv["move_type"] == "in_invoice" and vinv["state"] != "cancel":
+                if vinv and vinv["move_type"] in (VENDOR_MOVE_TYPES + VENDOR_REFUND_TYPES) \
+                        and vinv["state"] != "cancel":
                     vendor_invoices_map[po["id"]].append(vinv)
+    # Una venta puede tener varias OC (una por talento/proveedor). po_map guarda
+    # solo una, asi que aca sumamos lo pagado de TODAS las OC de cada venta,
+    # contando facturas y boletas de honorarios pagadas y restando notas de credito.
+    pago_odoo_map = {}
+    ocs_por_venta = {}
+    for po in pos_raw:
+        origen = (po.get("origin") or "").strip()
+        if not origen:
+            continue
+        # el origin puede listar varias ventas: "CL02790, CL02550"
+        for nombre in [p.strip().upper() for p in origen.split(",") if p.strip()]:
+            ocs_por_venta.setdefault(nombre, []).append(po)
+
+    for nombre, pos in ocs_por_venta.items():
+        total = 0
+        for po in pos:
+            for inv in vendor_invoices_map.get(po["id"], []):
+                if inv.get("payment_state") not in ("paid", "in_payment"):
+                    continue
+                monto = inv.get("amount_untaxed") or 0
+                if inv.get("move_type") in VENDOR_REFUND_TYPES:
+                    total -= monto
+                else:
+                    total += monto
+        if total:
+            pago_odoo_map[nombre] = total
+
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
+    print(f"    {len(pago_odoo_map)} ventas con pago al talento registrado en Odoo")
 
     return (talent_names, subtareas, task_talent_map, so_map, client_invoices_map,
-            po_map, vendor_invoices_map, sol_ext_map)
+            po_map, vendor_invoices_map, sol_ext_map, pago_odoo_map)
 
 
 def _normalizar_nombre(nombre):
@@ -1041,18 +1074,21 @@ def _clasificar_linea(line):
     return "talento"
 
 
+NO_TALENTO = {"CAMPANA", "CAMPAÑA", "SIN NOMBRE", "BOOKING FEES", "FEE AGENCIA", ""}
+
+
 def _talento_de_linea(line):
     """Talent name for a line, from the product name (text before the parenthesis)."""
     if line.get("product_id"):
         prod = line["product_id"][1] if isinstance(line["product_id"], list) else ""
         if prod:
             t = _extract_talent_from_product(prod)
-            if t and t not in ("Sin nombre", "—"):
+            if t and t.strip().upper() not in NO_TALENTO:
                 return t
     name = (line.get("name") or "").strip()
     if name:
         t = _extract_talent_from_product(name)
-        if t and t not in ("Sin nombre", "—"):
+        if t and t.strip().upper() not in NO_TALENTO:
             return t
     return "Sin talento"
 
@@ -1148,19 +1184,18 @@ def get_fecha_cobro_estimada(facturas):
     return fmt_date(dues[-1]) if dues else "—"
 
 
-def _pagado_de_venta(so, po_map, vendor_inv_map, pagos_map):
-    """Total already paid to talent for this sale order (vendor invoices, else pagos sheet)."""
-    so_name = (so.get("name") or "").strip()
-    po = po_map.get(so_name)
-    if po:
-        vinvs = vendor_inv_map.get(po["id"], [])
-        paid = sum(
-            i.get("amount_untaxed") or 0 for i in vinvs
-            if i.get("payment_state") in ("paid", "in_payment")
-        )
-        if paid:
-            return paid
-    return pagos_map.get(so_name.upper(), 0)
+def _pagado_de_venta(so, pago_odoo_map, pagos_map):
+    """How much was already paid to the talent for this sale.
+
+    Primary source: Odoo purchase orders -> paid vendor bills. Includes boletas
+    de honorarios (in_receipt), which is how Chilean talents invoice, and sums
+    every PO attached to the sale. Falls back to the pagos spreadsheet.
+    """
+    nombre = (so.get("name") or "").strip().upper()
+    desde_odoo = pago_odoo_map.get(nombre, 0)
+    if desde_odoo:
+        return desde_odoo
+    return pagos_map.get(nombre, 0)
 
 
 def _estado_pago(pagado, esperado):
@@ -1179,7 +1214,7 @@ def _estado_pago(pagado, esperado):
 
 
 def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
-                              po_map, vendor_inv_map, roster, pagos_map):
+                              pago_odoo_map, roster, pagos_map):
     """One row per (sale order x talent), only for sales from INFORME_DESDE_ANIO on."""
     rows = []
     sin_roster = set()
@@ -1223,7 +1258,7 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
         facturas    = client_inv_map.get(so_id, [])
         cobrado_so  = get_cobrado_informe(so_id, facturas, inv_to_sos, neto_por_so)
         fecha_cobro = get_fecha_cobro_estimada(facturas)
-        pagado_so   = _pagado_de_venta(so, po_map, vendor_inv_map, pagos_map)
+        pagado_so   = _pagado_de_venta(so, pago_odoo_map, pagos_map)
 
         for talento, neto in sorted(netos.items()):
             share = (neto / neto_total) if neto_total else 0
@@ -1956,7 +1991,8 @@ if __name__ == "__main__":
     print("=" * 55)
     try:
         talent_names, subtareas, task_talent_map, so_map, \
-            client_inv_map, po_map, vendor_inv_map, sol_ext_map = bajar_datos()
+            client_inv_map, po_map, vendor_inv_map, sol_ext_map, \
+            pago_odoo_map = bajar_datos()
 
         print("\nConstruyendo datos...")
         talentos = construir_datos(talent_names, subtareas, task_talent_map,
@@ -1970,7 +2006,7 @@ if __name__ == "__main__":
         print("\nConstruyendo Informe Mensual...")
         informe_rows = construir_informe_mensual(
             so_map, sol_ext_map, client_inv_map,
-            po_map, vendor_inv_map, roster, pagos_map
+            pago_odoo_map, roster, pagos_map
         )
         print(f"  ✓ {len(informe_rows)} ventas en Informe Mensual")
 
