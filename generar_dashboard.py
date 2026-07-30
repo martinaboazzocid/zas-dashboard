@@ -1198,6 +1198,17 @@ def _pagado_de_venta(so, pago_odoo_map, pagos_map):
     return pagos_map.get(nombre, 0)
 
 
+def _estado_cobro(cobrado, neto):
+    """Collection state of a sale: COBRADO / PARCIAL / SIN COBRAR."""
+    if not cobrado or cobrado <= 0:
+        return "SIN COBRAR"
+    if not neto or neto <= 0:
+        return "COBRADO"
+    if cobrado >= neto - max(1.0, neto * 0.01):   # 1% tolerance
+        return "COBRADO"
+    return "PARCIAL"
+
+
 def _estado_pago(pagado, esperado):
     """Compare paid vs expected and return the status label."""
     if not pagado:
@@ -1283,6 +1294,7 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
                 "neto":        neto,
                 "costo":       costo,
                 "cobrado":     cobrado_so * share,
+                "cobro_estado": _estado_cobro(cobrado_so * share, neto),
                 "fecha_cobro": fecha_cobro or "—",
                 "pago":        _estado_pago(pagado_so * share, costo),
             })
@@ -1327,7 +1339,7 @@ def render_informe_mensual(rows):
             f'<td>{r["moneda"]}</td>'
             f'<td class="amt" data-v="{r["neto"]}">{_fmt_informe_num(r["neto"])}</td>'
             f'<td class="amt">{costo}</td>'
-            f'<td class="amt" data-v="{r["cobrado"]}">{cob}</td>'
+            f'<td class="amt" data-v="{r["cobro_estado"]}" title="{r["cobro_estado"]}">{cob}</td>'
             f'<td>{r["fecha_cobro"]}</td>'
             f'<td>{pago_badge(r["pago"])}</td>'
             "</tr>"
@@ -1359,6 +1371,13 @@ def render_informe_mensual(rows):
         '<div class="fsel-wrap"><label class="fsel-lbl">Moneda</label>'
         '<select class="fsel" id="im-moneda" data-col="5" onchange="applyInformeFilter()">'
         '<option value="">Todas</option></select></div>'
+        '<div class="fsel-wrap"><label class="fsel-lbl">Cobro</label>'
+        '<select class="fsel" data-col="8" onchange="applyInformeFilter()">'
+        '<option value="">Todas</option>'
+        '<option value="COBRADO">Cobradas</option>'
+        '<option value="PARCIAL">Cobro parcial</option>'
+        '<option value="SIN COBRAR">Sin cobrar</option>'
+        '</select></div>'
         '<div class="fsel-wrap"><label class="fsel-lbl">Pago al talento</label>'
         '<select class="fsel" id="im-pago" data-col="10" onchange="applyInformeFilter()">'
         '<option value="">Todos</option></select></div>'
@@ -1782,7 +1801,9 @@ function applyInformeFilter() {
     for (var i = 0; i < f.length; i++) {
       var td = tds[f[i][0]];
       var v = td ? (td.dataset.v || td.textContent).trim().toLowerCase() : '';
-      if (v.indexOf(f[i][1]) === -1) { ok = false; break; }
+      // la columna Cobro se compara exacta: 'cobrado' no debe matchear 'sin cobrar'
+      var okCell = (f[i][0] === 8) ? (v === f[i][1]) : (v.indexOf(f[i][1]) !== -1);
+      if (!okCell) { ok = false; break; }
     }
     tr.style.display = ok ? '' : 'none';
     if (ok) shown++;
