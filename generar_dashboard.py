@@ -994,33 +994,78 @@ def _parse_monto(raw):
     return -v if neg else v
 
 
+def _buscar_col(header, *claves):
+    """Index of the first header cell containing all the given keywords."""
+    for idx, cell in enumerate(header):
+        norm = _sin_tildes(cell).replace(" ", "")
+        if all(_sin_tildes(k).replace(" ", "") in norm for k in claves):
+            return idx
+    return None
+
+
+def _venta_de_id_campana(valor):
+    """'CL02790-1' -> 'CL02790'. Returns '' for n/a or empty values."""
+    s = str(valor or "").strip().upper()
+    if not s or s in ("N/A", "NA", "-", "#N/A"):
+        return ""
+    return s.split("-")[0].strip()
+
+
 def cargar_pagos():
-    """Read the pagos sheet. Column S (idx 18) = sale order name, column O (idx 14) = amount.
-    Returns {so_name: total_paid}.
+    """Read the pagos sheet from Google Sheets CSV export.
+
+    Columns are located by NAME, not position, because the sheet layout changes:
+      "ID Unico de Campana"                  -> sale order (CL02790-1 -> CL02790)
+      "MONTO NETO a considerar en Campanas"  -> amount to count
+      "STATUS"                               -> only rows marked PAGADO count
+    Returns {SO_NAME: total_paid}.
     """
     import csv, io
     pagos = {}
     try:
         url = f"https://docs.google.com/spreadsheets/d/{PAGOS_SHEET_ID}/export?format=csv&gid=0"
-        resp = requests.get(url, timeout=60)
+        resp = requests.get(url, timeout=90)
         resp.raise_for_status()
         if "text/html" in resp.headers.get("content-type", ""):
             raise RuntimeError("el sheet no es publico (devolvio HTML de login)")
-        reader = csv.reader(io.StringIO(resp.text))
-        next(reader, None)
-        for row in reader:
-            if len(row) <= 18:
+
+        rows = list(csv.reader(io.StringIO(resp.text)))
+        if not rows:
+            raise RuntimeError("sheet vacio")
+
+        header = rows[0]
+        i_venta = _buscar_col(header, "id", "campana")
+        i_monto = (_buscar_col(header, "monto", "neto")
+                   or _buscar_col(header, "importe"))
+        i_stat  = _buscar_col(header, "status")
+
+        if i_venta is None or i_monto is None:
+            raise RuntimeError(
+                f"no encontre las columnas necesarias. Header: {header[:20]}")
+
+        usadas, sin_venta, sin_monto = 0, 0, 0
+        for row in rows[1:]:
+            if not row:
                 continue
-            so_name = str(row[18]).strip().upper()
-            if not so_name:
+            if i_stat is not None and i_stat < len(row):
+                if row[i_stat] and "pagado" not in _sin_tildes(row[i_stat]):
+                    continue
+            venta = _venta_de_id_campana(row[i_venta] if i_venta < len(row) else "")
+            if not venta:
+                sin_venta += 1
                 continue
-            monto = _parse_monto(row[14])
+            monto = _parse_monto(row[i_monto] if i_monto < len(row) else "")
             if monto is None:
+                sin_monto += 1
                 continue
-            pagos[so_name] = pagos.get(so_name, 0) + monto
-        print(f"    -> pagos: {len(pagos)} ventas")
+            pagos[venta] = pagos.get(venta, 0) + monto
+            usadas += 1
+
+        print(f"    -> pagos: {len(pagos)} ventas ({usadas} filas usadas, "
+              f"{sin_venta} sin ID de campana, {sin_monto} sin monto)")
+        print(f"       columnas: venta={header[i_venta]!r} monto={header[i_monto]!r}")
         if not pagos:
-            print("    ! pagos vacio: revisa el formato del sheet")
+            print(f"    ! pagos vacio. Header leido: {header[:20]}")
     except Exception as e:
         print(f"    ! No se pudo cargar pagos: {e}")
         print("      (el sheet debe estar compartido como 'cualquiera con el enlace puede ver')")
@@ -1318,12 +1363,19 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
         pagado_so   = _pagado_de_venta(so, pago_odoo_map, pagos_map)
 
         for talento, neto in sorted(netos.items()):
-            share = (neto / neto_total) if neto_total else 0
+            # peso = que parte de la venta es de este talento (para prorratear
+            # cobros y pagos que estan a nivel de venta).
+            peso = (neto / neto_total) if neto_total else 0
+            cobrado_talento = cobrado_so * peso
+            pagado_talento  = pagado_so * peso
 
-            share, origen = resolver_share_talento(so, roster, talento, date_order)
-            if share is not None:
-                costo   = neto * share
-                pct_txt = f"{_fmt_informe_num(costo)} ({round(share * 100)}%)"
+            # share_talento = que porcentaje del neto le corresponde al talento
+            # (80% fijo si el contrato es artistico, si no el fee del roster).
+            share_talento, origen = resolver_share_talento(
+                so, roster, talento, date_order)
+            if share_talento is not None:
+                costo   = neto * share_talento
+                pct_txt = f"{_fmt_informe_num(costo)} ({round(share_talento * 100)}%)"
             else:
                 costo   = None
                 pct_txt = "—"
@@ -1340,10 +1392,10 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
                 "neto":        neto,
                 "costo":       costo,
                 "costo_origen": origen or "",
-                "cobrado":     cobrado_so * share,
-                "cobro_estado": _estado_cobro(cobrado_so * share, neto),
+                "cobrado":     cobrado_talento,
+                "cobro_estado": _estado_cobro(cobrado_talento, neto),
                 "fecha_cobro": fecha_cobro or "—",
-                "pago":        _estado_pago(pagado_so * share, costo),
+                "pago":        _estado_pago(pagado_talento, costo),
             })
 
     print(f"    {len(rows)} filas ({omitidas} ventas omitidas por ser previas a {INFORME_DESDE_ANIO})")
