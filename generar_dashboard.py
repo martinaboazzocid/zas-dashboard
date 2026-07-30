@@ -34,6 +34,7 @@ BATCH           = 500
 PAGOS_SHEET_ID   = "1XmVY5hnipn4FvTkB4_lBtVgnv3GmRLwqdAzq2CfK2Ak"
 ROSTER_SHEET_ID  = "1Pngi_fbftcKXPqCnMjCJ8hLQ7eDZ5eau7IUnNA5nk7w"
 CHILE_COMPANY_ID = 2
+INFORME_DESDE_ANIO = 2026   # el Informe Mensual solo toma ventas de este anio en adelante
 
 PAIS_LABELS = {
     "Campañas":                  "Campañas Argentinas",
@@ -293,7 +294,59 @@ def bajar_datos():
                     vendor_invoices_map[po["id"]].append(vinv)
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
 
-    return talent_names, subtareas, task_talent_map, so_map, client_invoices_map, po_map, vendor_invoices_map, sol_ext_map
+    # ── [8/8] Lineas de factura -> reparto del cobro por venta ──────────────
+    # Una factura consolidada puede cubrir varias ventas. Cada linea de factura
+    # apunta via sale_line_ids a la linea de venta que factura, asi que sumando
+    # price_subtotal por venta obtenemos el cobro real de cada una.
+    print("\n[8/8] Lineas de factura (reparto por venta)...")
+    sol_to_so = {}
+    for so_id_k, lines_k in sol_ext_map.items():
+        for l in lines_k:
+            sol_to_so[l["id"]] = so_id_k
+
+    # Solo las facturas de las ventas del Informe (>= INFORME_DESDE_ANIO)
+    so_informe = {
+        so["id"] for so in sale_orders
+        if str(so.get("date_order") or "")[:4].isdigit()
+        and int(str(so["date_order"])[:4]) >= INFORME_DESDE_ANIO
+    }
+    inv_ids_informe = sorted({
+        inv["id"]
+        for so_id_k in so_informe
+        for inv in client_invoices_map.get(so_id_k, [])
+    })
+
+    reparto = {}   # {move_id: {so_id: monto_base}}
+    if inv_ids_informe:
+        aml = []
+        for i in range(0, len(inv_ids_informe), 200):
+            aml.extend(fetch_all(
+                session, model="account.move.line",
+                domain=[["move_id", "in", inv_ids_informe[i:i+200]],
+                        ["display_type", "=", "product"]],
+                fields=["id", "move_id", "sale_line_ids", "price_subtotal"],
+            ))
+        for l in aml:
+            mv = l["move_id"][0] if isinstance(l.get("move_id"), list) else l.get("move_id")
+            if not mv:
+                continue
+            sub = l.get("price_subtotal") or 0
+            if not sub:
+                continue
+            targets = {sol_to_so[s] for s in (l.get("sale_line_ids") or []) if s in sol_to_so}
+            if not targets:
+                continue
+            parte = sub / len(targets)
+            for so_id_t in targets:
+                reparto.setdefault(mv, {})[so_id_t] = \
+                    reparto.setdefault(mv, {}).get(so_id_t, 0) + parte
+        print(f"    {len(aml)} lineas de {len(inv_ids_informe)} facturas  ✓")
+    else:
+        print("    Sin facturas para repartir")
+
+
+    return (talent_names, subtareas, task_talent_map, so_map, client_invoices_map,
+            po_map, vendor_invoices_map, sol_ext_map, reparto)
 
 
 def _normalizar_nombre(nombre):
@@ -1087,14 +1140,32 @@ def desglosar_por_talento(so, sol_ext_map):
     return netos, sum(netos.values())
 
 
-def get_cobrado_informe(facturas):
-    """Sum of base amounts from paid customer invoices."""
-    return sum(
-        i.get("amount_untaxed") or 0
-        for i in facturas
-        if i.get("move_type") == "out_invoice"
-        and i.get("payment_state") in ("paid", "in_payment")
-    )
+def get_cobrado_informe(so, facturas, reparto, neto_venta):
+    """Amount actually collected for THIS sale order.
+
+    A consolidated invoice can cover several sales, so we never use the whole
+    invoice total. We use the invoice lines attributed to this sale via
+    sale_line_ids. Credit notes are subtracted. Falls back to the invoice total
+    only when it unambiguously belongs to a single sale.
+    """
+    so_id = so["id"]
+    total = 0
+    for inv in facturas:
+        if inv.get("payment_state") not in ("paid", "in_payment"):
+            continue
+        mt = inv.get("move_type")
+        if mt not in ("out_invoice", "out_refund"):
+            continue
+        atrib = (reparto.get(inv["id"]) or {})
+        if atrib:
+            monto = atrib.get(so_id, 0)
+        elif len(atrib) == 0 and inv.get("_solo_una_venta"):
+            monto = inv.get("amount_untaxed") or 0
+        else:
+            # No line-level link: use the invoice total only if it fits this sale
+            monto = min(inv.get("amount_untaxed") or 0, neto_venta or 0)
+        total += -monto if mt == "out_refund" else monto
+    return total
 
 
 def get_fecha_cobro_estimada(facturas):
@@ -1148,29 +1219,38 @@ def _estado_pago(pagado, esperado):
 
 
 def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
-                              po_map, vendor_inv_map, roster, pagos_map):
-    """One row per (sale order x talent)."""
+                              po_map, vendor_inv_map, roster, pagos_map,
+                              reparto=None):
+    """One row per (sale order x talent), only for sales from INFORME_DESDE_ANIO on."""
     rows = []
     sin_roster = set()
+    reparto = reparto or {}
+    omitidas = 0
 
     for so in sorted(so_map.values(), key=lambda s: s.get("name", "")):
         so_id      = so["id"]
         so_name    = so.get("name", "")
         date_order = so.get("date_order", "")
+
+        anio = str(date_order or "")[:4]
+        if not (anio.isdigit() and int(anio) >= INFORME_DESDE_ANIO):
+            omitidas += 1
+            continue
+
         marca      = get_marca(so)
         marca      = marca.upper() if marca and marca != "—" else "—"
         campana    = get_campana(so)
         zt         = get_zas_talento(so)
         moneda     = get_currency(so)
 
-        facturas    = client_inv_map.get(so_id, [])
-        cobrado_so  = get_cobrado_informe(facturas)
-        fecha_cobro = get_fecha_cobro_estimada(facturas)
-        pagado_so   = _pagado_de_venta(so, po_map, vendor_inv_map, pagos_map)
-
         netos, neto_total = desglosar_por_talento(so, sol_ext_map)
         if not netos:
             continue
+
+        facturas    = client_inv_map.get(so_id, [])
+        cobrado_so  = get_cobrado_informe(so, facturas, reparto, neto_total)
+        fecha_cobro = get_fecha_cobro_estimada(facturas)
+        pagado_so   = _pagado_de_venta(so, po_map, vendor_inv_map, pagos_map)
 
         for talento, neto in sorted(netos.items()):
             share = (neto / neto_total) if neto_total else 0
@@ -1199,6 +1279,7 @@ def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
                 "pago":        _estado_pago(pagado_so * share, costo),
             })
 
+    print(f"    {len(rows)} filas ({omitidas} ventas omitidas por ser previas a {INFORME_DESDE_ANIO})")
     if sin_roster:
         print(f"    ! {len(sin_roster)} talentos sin fee en el roster "
               f"(ej: {', '.join(sorted(sin_roster)[:5])})")
@@ -1255,7 +1336,8 @@ def render_informe_mensual(rows):
 
     return (
         f'<div class="sum">Filas: <strong>{len(rows)}</strong> · '
-        f'Talentos: <strong>{len(talentos)}</strong> {aviso}</div>'
+        f'Talentos: <strong>{len(talentos)}</strong> · '
+        f'<span class="sm">ventas desde {INFORME_DESDE_ANIO}</span> {aviso}</div>'
         '<div class="tw informe-wrap">'
         '<div class="fbar" id="imfbar">'
         '<span class="flab">Filtrar:</span>'
@@ -1901,7 +1983,7 @@ if __name__ == "__main__":
     print("=" * 55)
     try:
         talent_names, subtareas, task_talent_map, so_map, \
-            client_inv_map, po_map, vendor_inv_map, sol_ext_map = bajar_datos()
+            client_inv_map, po_map, vendor_inv_map, sol_ext_map, reparto = bajar_datos()
 
         print("\nConstruyendo datos...")
         talentos = construir_datos(talent_names, subtareas, task_talent_map,
@@ -1915,7 +1997,7 @@ if __name__ == "__main__":
         print("\nConstruyendo Informe Mensual...")
         informe_rows = construir_informe_mensual(
             so_map, sol_ext_map, client_inv_map,
-            po_map, vendor_inv_map, roster, pagos_map
+            po_map, vendor_inv_map, roster, pagos_map, reparto
         )
         print(f"  ✓ {len(informe_rows)} ventas en Informe Mensual")
 
