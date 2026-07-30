@@ -297,32 +297,49 @@ def bajar_datos():
                 if vinv and vinv["move_type"] in (VENDOR_MOVE_TYPES + VENDOR_REFUND_TYPES) \
                         and vinv["state"] != "cancel":
                     vendor_invoices_map[po["id"]].append(vinv)
-    # Una venta puede tener varias OC (una por talento/proveedor). po_map guarda
-    # solo una, asi que aca sumamos lo pagado de TODAS las OC de cada venta,
-    # contando facturas y boletas de honorarios pagadas y restando notas de credito.
-    pago_odoo_map = {}
-    ocs_por_venta = {}
+    # Una venta puede tener varias OC (una por entrega/talento), y una MISMA
+    # boleta puede cubrir varias de esas OC: BHE 000374 tiene
+    # invoice_origin "P05075, P04875, P04773", las tres de CL02629. Si sumamos
+    # por OC contamos la boleta 3 veces. Asi que agrupamos por factura y la
+    # repartimos entre las ventas de sus OC, ponderando por el monto de cada OC.
+    venta_de_oc = {}
     for po in pos_raw:
         origen = (po.get("origin") or "").strip()
         if not origen:
             continue
-        # el origin puede listar varias ventas: "CL02790, CL02550"
         for nombre in [p.strip().upper() for p in origen.split(",") if p.strip()]:
-            ocs_por_venta.setdefault(nombre, []).append(po)
+            venta_de_oc.setdefault(po["id"], set()).add(nombre)
 
-    for nombre, pos in ocs_por_venta.items():
-        total = 0
-        for po in pos:
-            for inv in vendor_invoices_map.get(po["id"], []):
-                if inv.get("payment_state") not in ("paid", "in_payment"):
-                    continue
-                monto = inv.get("amount_untaxed") or 0
-                if inv.get("move_type") in VENDOR_REFUND_TYPES:
-                    total -= monto
-                else:
-                    total += monto
-        if total:
-            pago_odoo_map[nombre] = total
+    # {inv_id: {venta: monto_de_sus_OC}}
+    peso_por_factura = {}
+    factura_obj = {}
+    for po in pos_raw:
+        ventas = venta_de_oc.get(po["id"])
+        if not ventas:
+            continue
+        monto_oc = po.get("amount_untaxed") or 0
+        for inv in vendor_invoices_map.get(po["id"], []):
+            factura_obj[inv["id"]] = inv
+            dest = peso_por_factura.setdefault(inv["id"], {})
+            for venta in ventas:
+                dest[venta] = dest.get(venta, 0) + (monto_oc / len(ventas))
+
+    pago_odoo_map = {}
+    for inv_id, pesos in peso_por_factura.items():
+        inv = factura_obj[inv_id]
+        if inv.get("payment_state") not in ("paid", "in_payment"):
+            continue
+        base = inv.get("amount_untaxed") or 0
+        if not base:
+            continue
+        if inv.get("move_type") in VENDOR_REFUND_TYPES:
+            base = -base
+        suma = sum(pesos.values())
+        for venta, peso in pesos.items():
+            parte = base * (peso / suma) if suma > 0 else base / len(pesos)
+            pago_odoo_map[venta] = pago_odoo_map.get(venta, 0) + parte
+
+    pago_odoo_map = {k: v for k, v in pago_odoo_map.items() if v}
 
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
     print(f"    {len(pago_odoo_map)} ventas con pago al talento registrado en Odoo")
