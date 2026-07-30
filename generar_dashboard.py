@@ -13,16 +13,8 @@ Salida:
 
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
-
-try:
-    import openpyxl
-    HAS_OPENPYXL = True
-except ImportError:
-    HAS_OPENPYXL = False
-    print("⚠ openpyxl no instalado. % Talento desde ROSTER no estará disponible.")
-    print("  Instalar: pip install openpyxl")
 
 # ══════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -38,11 +30,9 @@ MEXICO_ID       = 3
 ALL_COMPANY_IDS = [1, 2, 3, 4, 5, 6]
 BATCH           = 500
 
-# Archivo ROSTER (debe estar en la misma carpeta que este script)
-ROSTER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roster.xlsx")
-
-# Tipos de contrato artístico (valores internos de Odoo, case-insensitive)
-ARTISTIC_CONTRACT_TYPES = {"artistico", "artístico", "artistic", "artísticos", "artisticos"}
+PAGOS_SHEET_ID   = "1XmVY5hnipn4FvTkB4_lBtVgnv3GmRLwqdAzq2CfK2Ak"
+ROSTER_SHEET_ID  = "1Pngi_fbftcKXPqCnMjCJ8hLQ7eDZ5eau7IUnNA5nk7w"
+CHILE_COMPANY_ID = 2
 
 PAIS_LABELS = {
     "Campañas":                  "Campañas Argentinas",
@@ -85,106 +75,6 @@ def traducir_pais(val):
             return v
     return val
 
-
-# ══════════════════════════════════════════════════════════════
-# ROSTER — % ZAS por talento por mes
-# ══════════════════════════════════════════════════════════════
-
-def cargar_roster():
-    """
-    Carga roster.xlsx y devuelve dict:
-        { NOMBRE_UPPER: { (year, month): zas_pct_float } }
-    Los meses con valor 'EXTERNO' no se incluyen (sin contrato ese mes).
-    """
-    if not HAS_OPENPYXL:
-        return {}
-    if not os.path.exists(ROSTER_FILE):
-        print(f"    ⚠ ROSTER no encontrado en: {ROSTER_FILE}")
-        print("      Copiá roster.xlsx a la misma carpeta que este script.")
-        return {}
-    try:
-        wb = openpyxl.load_workbook(ROSTER_FILE, data_only=True)
-        ws = wb.active
-
-        # Fila 1: Creator, Country, Signing Date, Termination Date, [fechas de mes...]
-        headers = [cell.value for cell in ws[1]]
-        month_cols = []  # [(col_idx_0based, (year, month)), ...]
-        for i, h in enumerate(headers[4:], start=4):
-            if h and isinstance(h, datetime):
-                month_cols.append((i, (h.year, h.month)))
-
-        roster = {}
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            name = row[0]
-            if not name:
-                continue
-            name_clean = str(name).strip().upper().replace("\n", "").replace("\r", "")
-            roster[name_clean] = {}
-            for col_idx, (year, month) in month_cols:
-                val = row[col_idx] if col_idx < len(row) else None
-                if val is not None and val != "EXTERNO" and isinstance(val, (int, float)):
-                    roster[name_clean][(year, month)] = float(val)
-
-        print(f"    ✓ ROSTER cargado: {len(roster)} talentos")
-        return roster
-    except Exception as e:
-        print(f"    ⚠ Error cargando ROSTER: {e}")
-        return {}
-
-
-def get_zas_pct(roster, talent_name, sale_date_str):
-    """
-    Devuelve el % de ZAS (0.0-1.0) para un talento en el mes de la venta.
-    Retorna None si no se encuentra.
-    """
-    if not roster or not talent_name or not sale_date_str:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(sale_date_str)[:10])
-        year, month = dt.year, dt.month
-    except Exception:
-        return None
-
-    name_upper = str(talent_name).strip().upper().replace("\n", "")
-
-    # Búsqueda directa
-    if name_upper in roster:
-        return roster[name_upper].get((year, month))
-
-    # Búsqueda tolerante (puede haber pequeñas diferencias)
-    for roster_name, vals in roster.items():
-        if roster_name.strip() == name_upper.strip():
-            return vals.get((year, month))
-
-    return None
-
-
-def es_venta_artistica(so):
-    """True si el tipo de contrato es artístico (talento recibe 80%)."""
-    tipo = so.get("x_studio_tipo_de_contrato")
-    if not tipo or tipo is False:
-        return False
-    if isinstance(tipo, (list, tuple)):
-        tipo = tipo[1] if len(tipo) > 1 else str(tipo[0])
-    tipo_str = str(tipo).lower().strip()
-    return tipo_str in ARTISTIC_CONTRACT_TYPES or "artis" in tipo_str
-
-
-def get_tipo_contrato(so):
-    """Devuelve el tipo de contrato como texto legible."""
-    if not so:
-        return "—"
-    tipo = so.get("x_studio_tipo_de_contrato")
-    if not tipo or tipo is False:
-        return "—"
-    if isinstance(tipo, (list, tuple)):
-        tipo = tipo[1] if len(tipo) > 1 else str(tipo[0])
-    return str(tipo).strip() or "—"
-
-
-# ══════════════════════════════════════════════════════════════
-# ODOO
-# ══════════════════════════════════════════════════════════════
 
 def login(session):
     print("  Autenticando...")
@@ -298,7 +188,8 @@ def bajar_datos():
                     "x_studio_tipo_de_contrato", "x_studio_nombre_de_la_campaa",
                     "x_studio_marca", "date_order", "partner_id",
                     "invoice_ids", "order_line",
-                    "x_studio_factura_o_boleta", "x_studio_selection_field_4kh_1it0ckuc4"],
+                    "x_studio_factura_o_boleta", "x_studio_selection_field_4kh_1it0ckuc4",
+                    "x_studio_sub_bu_externos"],
         ))
 
     sale_orders = [
@@ -318,17 +209,20 @@ def bajar_datos():
     print("\n[5/7] Líneas de venta...")
     sol_ids_all = list({lid for so in sale_orders for lid in (so.get("order_line") or [])})
     sol_map = {}
+    sol_ext_map = {}   # {so_id: [line_dict, ...]} for Informe Mensual
     for i in range(0, len(sol_ids_all), 200):
         lines = fetch_all(
             session,
             model="sale.order.line",
             domain=[["id", "in", sol_ids_all[i:i+200]]],
-            fields=["id", "order_id", "product_id", "task_id"],
+            fields=["id", "order_id", "product_id", "task_id", "name", "price_subtotal"],
         )
         for line in lines:
             if line.get("product_id"):
                 prod_name = line["product_id"][1] if isinstance(line["product_id"], list) else ""
                 sol_map[line["id"]] = _extract_talent_from_product(prod_name)
+            oid = line["order_id"][0] if isinstance(line["order_id"], list) else line["order_id"]
+            sol_ext_map.setdefault(oid, []).append(line)
 
     task_talent_map = {}
     for t in subtareas:
@@ -398,7 +292,7 @@ def bajar_datos():
                     vendor_invoices_map[po["id"]].append(vinv)
     print(f"    {len(pos_raw)} OC, {len(po_inv_ids)} fact. proveedor  ✓")
 
-    return talent_names, subtareas, task_talent_map, so_map, client_invoices_map, po_map, vendor_invoices_map
+    return talent_names, subtareas, task_talent_map, so_map, client_invoices_map, po_map, vendor_invoices_map, sol_ext_map
 
 
 def _normalizar_nombre(nombre):
@@ -516,12 +410,8 @@ def badge(cls, text):
     return f'<span class="badge {cls}">{text}</span>'
 
 
-# ══════════════════════════════════════════════════════════════
-# CONSTRUIR DATOS
-# ══════════════════════════════════════════════════════════════
-
 def construir_datos(talent_names, subtareas, task_talent_map, so_map,
-                    client_inv_map, po_map, vendor_inv_map, roster=None):
+                    client_inv_map, po_map, vendor_inv_map):
     talent_tasks = defaultdict(list)
     for t in subtareas:
         talent = task_talent_map.get(t["id"], _extract_talent_from_task(t.get("name", "")))
@@ -564,6 +454,8 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
                 i.get("payment_state") in ("paid", "in_payment") for i in facturas
             )
 
+            # ── MEJORA 2: si la venta está 100% pagada (factura consolidada),
+            #    forzar pct_fact=100 aunque tot_fact > neto ──────────────────
             if neto > 0:
                 pct_fact_raw = (tot_fact / neto) * 100
             else:
@@ -590,30 +482,13 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
                 factura_status = f"{pct_fact}%"
                 cobro_status, cobro_fecha = None, None
 
-            # ── Fecha estimada de pago (vencimiento + 10 días) ─────────────
-            if not facturas:
-                fecha_est_pago = "Pendiente facturar"
-            elif dues:
-                try:
-                    raw_due = datetime.fromisoformat(str(dues[-1])[:10])
-                    fecha_est_pago = (raw_due + timedelta(days=10)).strftime("%d/%m/%Y")
-                except Exception:
-                    fecha_est_pago = "Pendiente facturar"
-            else:
-                fecha_est_pago = "Pendiente facturar"
-
-            # ── OC y facturas proveedor ────────────────────────────────────
             po       = po_map.get(so["name"])
             v_neto   = None
             v_status = None
             v_fecha  = None
             v_nums   = ""
-            status_pago_talento = "Sin OC"
-
             if po:
-                vinvs    = vendor_inv_map.get(po["id"], [])
-                po_amount = po.get("amount_untaxed") or 0
-
+                vinvs = vendor_inv_map.get(po["id"], [])
                 if vinvs:
                     v_neto   = sum(i.get("amount_untaxed") or 0 for i in vinvs)
                     v_paid   = all(i.get("payment_state") in ("paid", "in_payment") for i in vinvs)
@@ -621,37 +496,8 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
                     v_fecha  = fmt_date(v_dues[-1]) if v_dues else None
                     v_status = "pagado" if v_paid else "pendiente"
                     v_nums   = get_nums_facturas_prov(vinvs)
-
-                    # Status de pago al talento: compara total pagado vs OC
-                    paid_total = sum(
-                        i.get("amount_untaxed") or 0
-                        for i in vinvs
-                        if i.get("payment_state") in ("paid", "in_payment")
-                    )
-                    if paid_total <= 0:
-                        status_pago_talento = "PENDIENTE"
-                    elif po_amount > 0 and paid_total >= po_amount * 0.999:
-                        status_pago_talento = "PAGADO"
-                    else:
-                        status_pago_talento = "PAGO PARCIAL"
                 else:
                     v_status = "sin_factura"
-                    status_pago_talento = "PENDIENTE"
-
-            # ── % del talento por contrato ─────────────────────────────────
-            if es_venta_artistica(so):
-                pct_talento_real_label = "80% (Art.)"
-                pct_talento_real_val   = 80.0
-            else:
-                sale_date = so.get("date_order")
-                zas_pct = get_zas_pct(roster, talent_name, sale_date) if roster else None
-                if zas_pct is not None:
-                    talento_pct = (1.0 - zas_pct) * 100
-                    pct_talento_real_label = f"{talento_pct:.0f}%"
-                    pct_talento_real_val   = talento_pct
-                else:
-                    pct_talento_real_label = "—"
-                    pct_talento_real_val   = None
 
             pct_talento  = fmt_pct(v_neto, neto) if v_neto is not None else "—"
             fact_boleta  = get_factura_boleta(so)
@@ -667,30 +513,23 @@ def construir_datos(talent_names, subtareas, task_talent_map, so_map,
                 "pct_talento": pct_talento,
                 "fact_boleta": fact_boleta,
                 "pais": pais_final(so),
-                # ── Nuevos campos ──────────────────────────────────────────
-                "fecha_est_pago":        fecha_est_pago,
-                "status_pago_talento":   status_pago_talento,
-                "pct_talento_real_label": pct_talento_real_label,
-                "pct_talento_real_val":   pct_talento_real_val,
             })
 
         finance.sort(key=lambda x: x["so"].get("name", ""))
+        # Índice rápido por nombre de venta para uso en render_published / render_pending
         finance_by_so = {f["so"]["name"]: f for f in finance}
         talentos[talent_name] = {
-            "published":     published,
-            "pending":       pending,
-            "finance":       finance,
+            "published":    published,
+            "pending":      pending,
+            "finance":      finance,
             "finance_by_so": finance_by_so,
         }
 
     return talentos
 
 
-# ══════════════════════════════════════════════════════════════
-# HELPERS DE RENDER (CELDAS)
-# ══════════════════════════════════════════════════════════════
-
 def _render_fact_cobro_cell(f):
+    """Genera el HTML para la celda Factura / Cobro en publicados/pendientes."""
     if f is None:
         return badge("bd", "—")
     fs = f["factura_status"]
@@ -715,6 +554,7 @@ def _render_fact_cobro_cell(f):
 
 
 def _render_pago_talento_cell(f):
+    """Genera el HTML para la celda Pago talento en publicados/pendientes."""
     if f is None:
         return badge("bd", "—")
     if not f["tiene_po"]:
@@ -728,48 +568,6 @@ def _render_pago_talento_cell(f):
         return badge("br", "Pendiente pago")
     return badge("bd", "—")
 
-
-def _render_fecha_est_pago_cell(f):
-    """Celda: Fecha estimada de pago (vencimiento + 10 días)."""
-    if f is None:
-        return badge("bd", "—")
-    fep = f.get("fecha_est_pago")
-    if not fep:
-        return badge("bd", "—")
-    if fep == "Pendiente facturar":
-        return badge("by", "Pend. facturar")
-    return f'<span class="dv">{fep}</span>'
-
-
-def _render_status_pago_talento_cell(f):
-    """Celda: Status de pago al talento (PAGADO / PAGO PARCIAL / PENDIENTE)."""
-    if f is None:
-        return badge("bd", "—")
-    spt = f.get("status_pago_talento", "")
-    if spt == "PAGADO":
-        return badge("bg", "PAGADO")
-    elif spt == "PAGO PARCIAL":
-        return badge("by", "PAGO PARCIAL")
-    elif spt == "PENDIENTE":
-        return badge("br", "PENDIENTE")
-    elif spt == "Sin OC":
-        return badge("bd", "Sin OC")
-    return badge("bd", "—")
-
-
-def _render_pct_talento_real_cell(f):
-    """Celda: % del talento por contrato (ROSTER o 80% artístico)."""
-    if f is None:
-        return badge("bd", "—")
-    lbl = f.get("pct_talento_real_label", "—")
-    if lbl and lbl != "—":
-        return f'<span class="pct">{lbl}</span>'
-    return badge("bd", "—")
-
-
-# ══════════════════════════════════════════════════════════════
-# RENDER PUBLICADOS
-# ══════════════════════════════════════════════════════════════
 
 def render_published(published, finance_by_so=None):
     if not published:
@@ -790,13 +588,6 @@ def render_published(published, finance_by_so=None):
             tots[get_currency(it["so"])] += it["so"].get("amount_untaxed") or 0
         tot_str = "  ·  ".join(f"{c} {fmt_num(v)}" for c, v in tots.items())
 
-        # Fecha de exportación: "1/M/YYYY" (ej: 1/1/2026)
-        try:
-            _y, _m = mk.split("-")
-            export_mes = f"1/{int(_m)}/{_y}"
-        except Exception:
-            export_mes = ml
-
         rows = ""
         for it in items:
             t, so = it["task"], it["so"]
@@ -814,16 +605,12 @@ def render_published(published, finance_by_so=None):
               <td><span class="pt">{pais or "—"}</span></td>
               <td>{_render_fact_cobro_cell(f_dat)}</td>
               <td>{_render_pago_talento_cell(f_dat)}</td>
-              <td>{_render_fecha_est_pago_cell(f_dat)}</td>
-              <td>{_render_status_pago_talento_cell(f_dat)}</td>
-              <td>{_render_pct_talento_real_cell(f_dat)}</td>
-              <td><span class="sm">{get_tipo_contrato(so)}</span></td>
             </tr>"""
 
         html += f"""
         <div class="mg" id="{gid}">
           <div class="mh" onclick="tog('{gid}')">
-            <div class="mt" data-mes="{export_mes}">{ml.capitalize()} {badge("bd", f"{len(items)} cont.")}</div>
+            <div class="mt">{ml.capitalize()} {badge("bd", f"{len(items)} cont.")}</div>
             <div class="ms">{tot_str} <span class="chv">▾</span></div>
           </div>
           <div class="mb"><div class="tw"><table>
@@ -831,17 +618,12 @@ def render_published(published, finance_by_so=None):
               <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
               <th>Moneda</th><th class="r">Neto</th><th>Publicación</th><th>País campaña</th>
               <th>Fact. / Cobro</th><th>Pago talento</th>
-              <th>Fecha est. pago</th><th>Status pago talento</th><th>% Talento</th><th>Tipo contrato</th>
             </tr></thead>
             <tbody>{rows}</tbody>
           </table></div></div>
         </div>"""
     return html
 
-
-# ══════════════════════════════════════════════════════════════
-# RENDER PENDIENTES
-# ══════════════════════════════════════════════════════════════
 
 def render_pending(pending, finance_by_so=None):
     if not pending:
@@ -868,10 +650,6 @@ def render_pending(pending, finance_by_so=None):
           <td><span class="pt">{pais or "—"}</span></td>
           <td>{_render_fact_cobro_cell(f_dat)}</td>
           <td>{_render_pago_talento_cell(f_dat)}</td>
-          <td>{_render_fecha_est_pago_cell(f_dat)}</td>
-          <td>{_render_status_pago_talento_cell(f_dat)}</td>
-          <td>{_render_pct_talento_real_cell(f_dat)}</td>
-          <td><span class="sm">{get_tipo_contrato(so)}</span></td>
         </tr>"""
 
     return f"""<div class="tw"><table>
@@ -879,15 +657,10 @@ def render_pending(pending, finance_by_so=None):
         <th>N° Venta</th><th>Contenido</th><th>Marca</th><th>Campaña</th>
         <th>Moneda</th><th class="r">Neto</th><th>Fecha estimada</th><th>País campaña</th>
         <th>Fact. / Cobro</th><th>Pago talento</th>
-        <th>Fecha est. pago</th><th>Status pago talento</th><th>% Talento</th><th>Tipo contrato</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
 
-
-# ══════════════════════════════════════════════════════════════
-# RENDER FINANZAS
-# ══════════════════════════════════════════════════════════════
 
 def render_finance(finance):
     if not finance:
@@ -943,19 +716,8 @@ def render_finance(finance):
         pais_txt = f["pais"] or "—"
         pais_h   = f'<span class="pt">{pais_txt}</span>'
 
+        # data-v para "Fact. cliente": almacenar el pct_fact numérico para filtro condicional
         fact_data_v = str(f["pct_fact"]) if fs not in ("pendiente_factura",) else "pendiente_factura"
-
-        # ── Nuevas celdas ──────────────────────────────────────────────────
-        fep_h = _render_fecha_est_pago_cell(f)
-        spt_h = _render_status_pago_talento_cell(f)
-        ptr_h = _render_pct_talento_real_cell(f)
-
-        spt_val  = f.get("status_pago_talento", "")
-        ptr_val  = f.get("pct_talento_real_label", "—")
-        fep_val  = f.get("fecha_est_pago", "")
-        if fep_val == "Pendiente facturar":
-            fep_val = "Pendiente facturar"
-        tipo_txt = get_tipo_contrato(so)
 
         rows += f"""<tr>
           <td data-v="{so["name"]}"><span class="num">{so["name"]}</span></td>
@@ -972,13 +734,9 @@ def render_finance(finance):
           <td class="amt" data-v="{f["pct_talento"]}">{pct_h}</td>
           <td data-v="{f["v_status"] or ""}">{pago_h}</td>
           <td data-v="{pais_txt}">{pais_h}</td>
-          <td data-v="{fep_val}">{fep_h}</td>
-          <td data-v="{ptr_val}">{ptr_h}</td>
-          <td data-v="{spt_val}">{spt_h}</td>
-          <td data-v="{tipo_txt}"><span class="sm">{tipo_txt}</span></td>
         </tr>"""
 
-    # Filtros — col 16 = Status pago talento (nueva)
+    # ── MEJORA 1: filtro condicional para Fact. cliente ──────────────────────
     table = f"""<div class="tw">
       <div class="fbar" id="fbar">
         <span class="flab">Filtrar:</span>
@@ -1000,7 +758,7 @@ def render_finance(finance):
               <option value="gt">&gt; mayor a</option>
               <option value="pendiente">Sin factura</option>
             </select>
-            <input class="fsel-num" type="number" min="0" max="200" placeholder="%"
+            <input class="fsel-num" type="number" min="0" max="200" placeholder="%" 
                    oninput="applyFinFilter(this.closest('.tw'))" style="display:none">
           </div>
         </div>
@@ -1017,12 +775,6 @@ def render_finance(finance):
           </select>
         </div>
         <div class="fsel-wrap">
-          <label class="fsel-lbl">Status pago</label>
-          <select class="fsel" data-col="16" onchange="applyFinFilter(this.closest('.tw'))">
-            <option value="">Todos</option>
-          </select>
-        </div>
-        <div class="fsel-wrap">
           <label class="fsel-lbl">País campaña</label>
           <select class="fsel" data-col="13" onchange="applyFinFilter(this.closest('.tw'))">
             <option value="">Todos</option>
@@ -1036,7 +788,6 @@ def render_finance(finance):
         <th class="r">Neto</th><th>Fact/Boleta</th><th>Fact. cliente</th><th>Vencimiento</th>
         <th>Cobro 100%</th><th class="r">Fact. proveedor</th>
         <th>N° Fact. prov.</th><th class="r">% Talento</th><th>Pago talento</th><th>País campaña</th>
-        <th>Fecha est. pago</th><th>% del talento</th><th>Status pago talento</th><th>Tipo contrato</th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table></div>"""
@@ -1044,9 +795,349 @@ def render_finance(finance):
     return summary + table
 
 
+
+
 # ══════════════════════════════════════════════════════════════
-# CSS
+# INFORME MENSUAL — helpers
 # ══════════════════════════════════════════════════════════════
+
+def cargar_roster():
+    """Download roster from Google Sheets.
+    Returns {TALENT_NAME_UPPER: {(year, month): zas_fee_as_decimal}}.
+    E.g. 0.275 means ZAS keeps 27.5 %, talent gets 72.5 %.
+    """
+    import csv, io
+    roster = {}
+    header_dates = []
+    try:
+        url = f"https://docs.google.com/spreadsheets/d/{ROSTER_SHEET_ID}/export?format=csv&gid=0"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        reader = csv.reader(io.StringIO(resp.text))
+        rows = list(reader)
+        if not rows:
+            return roster
+        # Row 0 is header; columns E onwards (index 4+) are month dates
+        header = rows[0]
+        for col_idx, cell in enumerate(header[4:], start=4):
+            try:
+                dt = datetime.strptime(str(cell).strip(), "%Y-%m-%d")
+                header_dates.append((col_idx, dt.year, dt.month))
+            except ValueError:
+                try:
+                    # Try d/m/yyyy
+                    dt = datetime.strptime(str(cell).strip(), "%d/%m/%Y")
+                    header_dates.append((col_idx, dt.year, dt.month))
+                except ValueError:
+                    header_dates.append(None)
+
+        for row in rows[1:]:
+            if not row:
+                continue
+            talent = str(row[0]).strip().upper()
+            if not talent or talent == "EXTERNO":
+                continue
+            monthly = {}
+            for entry in header_dates:
+                if entry is None:
+                    continue
+                col_idx, yr, mo = entry
+                if col_idx < len(row):
+                    val = str(row[col_idx]).strip().replace(",", ".")
+                    if val and val.upper() != "EXTERNO":
+                        try:
+                            pct = float(val)
+                            # Normalize: if stored as 27.5 convert to 0.275
+                            if pct > 1:
+                                pct = pct / 100
+                            monthly[(yr, mo)] = pct
+                        except ValueError:
+                            pass
+            if monthly:
+                roster[talent] = monthly
+        print(f"    → roster: {len(roster)} talentos cargados")
+    except Exception as e:
+        print(f"    ⚠ No se pudo cargar roster desde Drive: {e}")
+    return roster
+
+
+def cargar_pagos():
+    """Download pagos spreadsheet from Google Sheets.
+    Returns {so_name: total_paid} from column S (SO number) and column O (amount).
+    """
+    import csv, io
+    pagos = {}
+    try:
+        url = f"https://docs.google.com/spreadsheets/d/{PAGOS_SHEET_ID}/export?format=csv&gid=0"
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        reader = csv.reader(io.StringIO(resp.text))
+        next(reader, None)  # skip header
+        for row in reader:
+            try:
+                so_name = row[18].strip() if len(row) > 18 else ""
+                monto_raw = row[14].strip() if len(row) > 14 else ""
+                if not so_name or not monto_raw:
+                    continue
+                monto = float(
+                    monto_raw.replace(".", "").replace(",", ".")
+                    .replace("$", "").replace(" ", "")
+                )
+                pagos[so_name] = pagos.get(so_name, 0) + monto
+            except (IndexError, ValueError):
+                continue
+        print(f"    → pagos: {len(pagos)} ventas cargadas")
+    except Exception as e:
+        print(f"    ⚠ No se pudo cargar pagos desde Drive: {e}")
+    return pagos
+
+
+def _get_zas_fee(roster, talent_name, date_order):
+    """Return ZAS fee decimal for talent+month, or None if not found."""
+    if not roster or not talent_name or not date_order:
+        return None
+    key = talent_name.strip().upper()
+    try:
+        dt = datetime.strptime(str(date_order)[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+    return roster.get(key, {}).get((dt.year, dt.month))
+
+
+def get_zas_talento(so):
+    """Return 'ZAS' or 'TALENTO' for a sale order."""
+    cid = so["company_id"][0] if isinstance(so.get("company_id"), list) else so.get("company_id")
+    if cid == CHILE_COMPANY_ID:
+        fb = str(so.get("x_studio_factura_o_boleta") or "").strip().lower()
+        return "ZAS" if fb == "factura" else "TALENTO"
+    sub_bu = str(so.get("x_studio_sub_bu_externos") or "").strip().upper()
+    return "TALENTO" if sub_bu == "TALENTO" else "ZAS"
+
+
+def calcular_neto_informe(so, sol_ext_map):
+    """Return neto = amount_untaxed − viáticos − rebate."""
+    total = so.get("amount_untaxed") or 0
+    viaticos, rebate = 0, 0
+    for line in sol_ext_map.get(so["id"], []):
+        name_l = (line.get("name") or "").lower()
+        sub = line.get("price_subtotal") or 0
+        if any(k in name_l for k in ("viatico", "viático", "travel expense")):
+            viaticos += sub
+        elif "rebate" in name_l:
+            rebate += sub
+    return total - viaticos - rebate
+
+
+def _fmt_informe_num(v):
+    if v is None:
+        return "—"
+    try:
+        return f"{int(round(float(v))):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _talent_from_so_lines(so_id, sol_ext_map):
+    """Best-effort talent name from SOL lines (skip fee/viatico/rebate lines)."""
+    skip_kw = ("viatico", "viático", "travel expense", "rebate", "fee agencia",
+               "booking fee", "campaña")
+    for line in sol_ext_map.get(so_id, []):
+        name_l = (line.get("name") or "").lower()
+        if any(k in name_l for k in skip_kw):
+            continue
+        if line.get("product_id"):
+            prod = line["product_id"][1] if isinstance(line["product_id"], list) else ""
+            t = _extract_talent_from_product(prod)
+            if t and t != "—":
+                return t
+    return "—"
+
+
+def get_cobrado_informe(facturas):
+    """Sum of base amounts from paid customer invoices."""
+    return sum(
+        i.get("amount_untaxed") or 0
+        for i in facturas
+        if i.get("move_type") == "out_invoice"
+        and i.get("payment_state") in ("paid", "in_payment")
+    )
+
+
+def get_fecha_cobro_estimada(facturas):
+    """First unpaid invoice due date + 15 days; or last paid date; or 'PENDIENTE FACTURA'."""
+    from datetime import timedelta
+    inv_only = [i for i in facturas if i.get("move_type") == "out_invoice"]
+    if not inv_only:
+        return "PENDIENTE FACTURA"
+    unpaid = [i for i in inv_only if i.get("payment_state") not in ("paid", "in_payment")]
+    if unpaid:
+        dues = sorted(i["invoice_date_due"] for i in unpaid if i.get("invoice_date_due"))
+        if not dues:
+            return "PENDIENTE FECHA"
+        try:
+            dt = datetime.strptime(dues[0], "%Y-%m-%d") + timedelta(days=15)
+            return dt.strftime("%d/%m/%Y")
+        except ValueError:
+            return "—"
+    # All paid
+    paid_dues = sorted(i["invoice_date_due"] for i in inv_only if i.get("invoice_date_due"))
+    return fmt_date(paid_dues[-1]) if paid_dues else "—"
+
+
+def get_pago_talento_status(so, po_map, vendor_inv_map, pagos_map,
+                            neto_venta, roster, talent_name, date_order):
+    """Return payment-status string vs. expected talent share."""
+    so_name = so.get("name", "")
+    zas_fee = _get_zas_fee(roster, talent_name, date_order)
+    expected = neto_venta * (1 - zas_fee) if zas_fee is not None and neto_venta else None
+
+    # Primary: paid vendor invoices via PO
+    paid = 0
+    po = po_map.get(so_name)
+    if po:
+        vinvs = vendor_inv_map.get(po["id"], [])
+        paid = sum(
+            i.get("amount_untaxed") or 0 for i in vinvs
+            if i.get("payment_state") in ("paid", "in_payment")
+        )
+
+    # Fallback: pagos spreadsheet
+    if paid == 0:
+        paid = pagos_map.get(so_name, 0)
+
+    if paid == 0:
+        return "PENDIENTE"
+
+    if expected is None or expected <= 0:
+        return f"PAGADO ({_fmt_informe_num(paid)})"
+
+    diff = paid - expected
+    if abs(diff) <= 1:
+        return "PAGADO"
+    elif diff > 0:
+        return f"PAGO EN EXCESO +{_fmt_informe_num(diff)}"
+    else:
+        return f"{_fmt_informe_num(paid)} PAGO PARCIAL"
+
+
+def construir_informe_mensual(so_map, sol_ext_map, client_inv_map,
+                              po_map, vendor_inv_map, roster, pagos_map):
+    """Build list of row dicts for the Informe Mensual tab (all SOs, all talents)."""
+    rows = []
+    for so in sorted(so_map.values(), key=lambda s: s.get("name", "")):
+        so_id   = so["id"]
+        so_name = so.get("name", "")
+        date_order = so.get("date_order", "")
+
+        talent = _talent_from_so_lines(so_id, sol_ext_map)
+        marca  = str(so.get("x_studio_marca") or "—").strip() or "—"
+        campana = str(so.get("x_studio_nombre_de_la_campaa") or "—").strip() or "—"
+        zt      = get_zas_talento(so)
+        moneda  = get_currency(so)
+
+        neto_venta = calcular_neto_informe(so, sol_ext_map)
+
+        zas_fee = _get_zas_fee(roster, talent, date_order)
+        if zas_fee is not None and neto_venta:
+            talent_share = neto_venta * (1 - zas_fee)
+            pct_str = f"{_fmt_informe_num(talent_share)} ({round((1 - zas_fee) * 100)}%)"
+        else:
+            talent_share = None
+            pct_str = "—"
+
+        facturas = client_inv_map.get(so_id, [])
+        cobrado  = get_cobrado_informe(facturas)
+        fecha_cobro = get_fecha_cobro_estimada(facturas)
+
+        pago = get_pago_talento_status(
+            so, po_map, vendor_inv_map, pagos_map,
+            neto_venta, roster, talent, date_order
+        )
+
+        rows.append({
+            "n_venta":    so_name,
+            "marca":      marca,
+            "campana":    campana,
+            "zt":         zt,
+            "moneda":     moneda,
+            "neto_venta": _fmt_informe_num(neto_venta),
+            "neto_raw":   neto_venta or 0,
+            "pct_talento": pct_str,
+            "cobrado":    _fmt_informe_num(cobrado) if cobrado else "0",
+            "cobrado_raw": cobrado or 0,
+            "fecha_cobro": fecha_cobro or "—",
+            "pago":        pago,
+        })
+    return rows
+
+
+def render_informe_mensual(rows):
+    """Render HTML panel content for the Informe Mensual tab."""
+    if not rows:
+        return '<div class="ns">No hay ventas disponibles</div>'
+
+    def pago_badge(pago):
+        if pago == "PAGADO":
+            return badge("bg", pago)
+        if "EXCESO" in pago:
+            return badge("bp", pago)
+        if "PARCIAL" in pago:
+            return badge("by", pago)
+        if pago == "PENDIENTE":
+            return badge("br", pago)
+        return badge("bd", pago)
+
+    trs = []
+    for r in rows:
+        zt_badge = badge("bg", r["zt"]) if r["zt"] == "ZAS" else badge("by", r["zt"])
+        trs.append(
+            f'<tr>'
+            f'<td>{r["n_venta"]}</td>'
+            f'<td>{r["marca"]}</td>'
+            f'<td class="cname" title="{r["campana"]}">{r["campana"]}</td>'
+            f'<td>{zt_badge}</td>'
+            f'<td>{r["moneda"]}</td>'
+            f'<td class="amt" data-v="{r["neto_raw"]}">{r["neto_venta"]}</td>'
+            f'<td class="amt">{r["pct_talento"]}</td>'
+            f'<td class="amt" data-v="{r["cobrado_raw"]}">{r["cobrado"]}</td>'
+            f'<td>{r["fecha_cobro"]}</td>'
+            f'<td>{pago_badge(r["pago"])}</td>'
+            f'</tr>'
+        )
+
+    table = (
+        '<div class="tw informe-wrap">'
+        '<div class="fbar" id="imfbar">'
+        '<span class="flab">Filtrar:</span>'
+        '<div class="fsel-wrap"><label class="fsel-lbl">ZAS/Talento</label>'
+        '<select class="fsel" data-col="3" onchange="applyInformeFilter()">'
+        '<option value="">Todos</option>'
+        '<option value="ZAS">ZAS</option>'
+        '<option value="TALENTO">TALENTO</option>'
+        '</select></div>'
+        '<div class="fsel-wrap"><label class="fsel-lbl">Moneda</label>'
+        '<select class="fsel" id="im-moneda" data-col="4" onchange="applyInformeFilter()">'
+        '<option value="">Todas</option>'
+        '</select></div>'
+        '<div class="fsel-wrap"><label class="fsel-lbl">Pago talento</label>'
+        '<select class="fsel" id="im-pago" data-col="9" onchange="applyInformeFilter()">'
+        '<option value="">Todos</option>'
+        '</select></div>'
+        '<button class="fclr" onclick="clearInformeFilter()">✕ Limpiar</button>'
+        '</div>'
+        '<table id="im-table">'
+        '<thead><tr>'
+        '<th>N° Venta</th><th>Marca</th><th>Campaña</th><th>ZAS/Talento</th>'
+        '<th>Moneda</th><th class="r">Neto venta</th><th class="r">% Talento</th>'
+        '<th class="r">Cobrado</th><th>Fecha cobro est.</th><th>Pago al talento</th>'
+        '</tr></thead>'
+        f'<tbody>{"".join(trs)}</tbody>'
+        '</table>'
+        '</div>'
+    )
+    total = len(rows)
+    summary = f'<div class="sum">Total ventas: <strong>{total}</strong></div>'
+    return summary + table
 
 CSS = r"""
 :root{
@@ -1065,7 +1156,6 @@ body{background:var(--bg);color:var(--tx);font-family:var(--sa);font-size:13px;m
 .lt{font-size:15px;font-weight:600;letter-spacing:-.3px}
 .ls{font-size:10px;color:var(--mu);font-family:var(--mo);letter-spacing:.8px}
 .lu{font-family:var(--mo);font-size:11px;color:var(--di)}
-.hdr-right{display:flex;align-items:center;gap:14px}
 .ts{padding:16px 32px;border-bottom:1px solid var(--br)}
 .tl{font-size:10px;font-family:var(--mo);letter-spacing:1.2px;color:var(--mu);text-transform:uppercase;margin-bottom:10px}
 .sw{position:relative;max-width:280px;margin-bottom:10px}
@@ -1166,16 +1256,16 @@ tr.fin-hidden{display:none}
 .exp-wrap{position:relative}
 .exp-btn{background:var(--sf2);border:1px solid var(--br2);color:var(--tx);padding:7px 14px;border-radius:8px;font-family:var(--sa);font-size:12.5px;font-weight:500;cursor:pointer;transition:.15s;display:flex;align-items:center;gap:6px}
 .exp-btn:hover{border-color:var(--ac);color:var(--ac)}
-.exp-btn.all-btn{border-color:var(--ac);color:var(--ac);background:rgba(77,255,195,.07)}
-.exp-btn.all-btn:hover{background:rgba(77,255,195,.15)}
 .exp-menu{display:none;position:absolute;right:0;top:calc(100% + 6px);background:var(--sf2);border:1px solid var(--br2);border-radius:8px;min-width:170px;z-index:20;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.4)}
 .exp-item{padding:10px 14px;font-size:12.5px;cursor:pointer;transition:.12s;white-space:nowrap}
 .exp-item:hover{background:var(--sf);color:var(--ac)}
-"""
 
-# ══════════════════════════════════════════════════════════════
-# JS
-# ══════════════════════════════════════════════════════════════
+/* Informe Mensual */
+.informe-wrap { padding: 0 0 1rem; }
+.informe-wrap table { min-width: 1200px; }
+.informe-wrap .cname { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+"""
 
 JS = r"""
 var _dropOpen = false;
@@ -1266,6 +1356,7 @@ function populateFinFilters(tw) {
   });
 }
 
+// Muestra/oculta el input numérico según el operador elegido
 function onPctOpChange(sel) {
   var numInput = sel.closest('.pct-filter-row').querySelector('.fsel-num');
   var needsNum = sel.value && sel.value !== 'pendiente';
@@ -1275,11 +1366,13 @@ function onPctOpChange(sel) {
 }
 
 function applyFinFilter(tw) {
+  // Filtros de select normales (exacto)
   var normalFilters = [];
   tw.querySelectorAll('.fsel:not(.fsel-op)').forEach(function(sel) {
     if (sel.value) normalFilters.push({col: parseInt(sel.dataset.col), val: sel.value});
   });
 
+  // Filtro de porcentaje condicional
   var pctFilter = null;
   var opSel = tw.querySelector('.fsel-op');
   if (opSel && opSel.value) {
@@ -1293,17 +1386,20 @@ function applyFinFilter(tw) {
   }
 
   tw.querySelectorAll('tbody tr').forEach(function(tr) {
+    // Evaluar filtros normales
     var show = normalFilters.every(function(f) {
       var td = tr.cells[f.col];
       return td && (td.dataset.v || '') === f.val;
     });
 
+    // Evaluar filtro de porcentaje
     if (show && pctFilter) {
-      var td = tr.cells[6];
+      var td = tr.cells[6]; // columna Fact. cliente
       var rawVal = td ? (td.dataset.v || '') : '';
       if (pctFilter.type === 'pendiente') {
         show = rawVal === 'pendiente_factura';
       } else {
+        // Es numérico: si la celda es "pendiente_factura" o "100" (string con 100%)
         var cellNum = (rawVal === '100' || rawVal === 'pendiente_factura')
           ? (rawVal === '100' ? 100 : NaN)
           : parseFloat(rawVal);
@@ -1334,7 +1430,7 @@ function clearFinFilters(tw) {
   tw.querySelectorAll('tbody tr').forEach(function(tr) { tr.classList.remove('fin-hidden'); });
 }
 
-// ── EXPORTAR individual (Excel / PDF) ─────────────────────────────────
+// ── EXPORTAR (Excel / PDF) ────────────────────────────────────────────
 function toggleExportMenu(id) {
   document.querySelectorAll('.exp-menu').forEach(function(m) {
     if (m.id !== id + '-expmenu') m.style.display = 'none';
@@ -1355,6 +1451,9 @@ function getSelectedTalentName() {
   return (!name || name === 'Seleccioná un talento...') ? '' : name;
 }
 
+// Junta filas visibles del panel activo (respeta el talento seleccionado y
+// cualquier filtro de la solapa Finanzas -filas marcadas fin-hidden se excluyen-).
+// En Publicados, si hay varios grupos por mes, se agrega una columna "Mes".
 function collectPanelData(panelId) {
   var content = document.getElementById(panelId + '-content');
   if (!content) return {header: [], rows: []};
@@ -1366,7 +1465,7 @@ function collectPanelData(panelId) {
   if (groups.length) {
     groups.forEach(function(g) {
       var mtEl = g.querySelector('.mt');
-      var mes = mtEl ? (mtEl.dataset.mes || (mtEl.childNodes[0].textContent || '').trim()) : '';
+      var mes = mtEl ? (mtEl.childNodes[0].textContent || '').trim() : '';
       var table = g.querySelector('table');
       if (!table) return;
       if (!header.length) {
@@ -1432,102 +1531,65 @@ function exportPDF(panelId, sheetName) {
   toggleExportMenu(panelId);
 }
 
-// ── EXPORTAR MASIVO — todos los talentos en un solo Excel ─────────────
-function exportAllExcel() {
-  if (typeof XLSX === 'undefined') { alert('No se pudo cargar el módulo de Excel. Revisá tu conexión a internet.'); return; }
-
-  var pubData  = {header: [], rows: []};
-  var pendData = {header: [], rows: []};
-  var finData  = {header: [], rows: []};
-
-  document.querySelectorAll('#data .td').forEach(function(sec) {
-    var talent = sec.dataset.t;
-
-    // ── PUBLICADOS (grupos por mes) ──────────────────────────────────
-    var pubGroups = sec.querySelectorAll('.tp .mg');
-    if (pubGroups.length) {
-      pubGroups.forEach(function(g) {
-        var table = g.querySelector('table');
-        if (!table) return;
-        if (!pubData.header.length) {
-          pubData.header = ['Talento', 'Mes'];
-          table.querySelectorAll('thead th').forEach(function(th) {
-            pubData.header.push(th.textContent.trim());
-          });
-        }
-        var mtEl = g.querySelector('.mt');
-        var mes = mtEl ? (mtEl.dataset.mes || (mtEl.childNodes[0].textContent || '').trim()) : '';
-        table.querySelectorAll('tbody tr').forEach(function(tr) {
-          var row = [talent, mes];
-          tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
-          pubData.rows.push(row);
-        });
-      });
-    }
-
-    // ── PENDIENTES ───────────────────────────────────────────────────
-    var pendTable = sec.querySelector('.te table');
-    if (pendTable) {
-      if (!pendData.header.length) {
-        pendData.header = ['Talento'];
-        pendTable.querySelectorAll('thead th').forEach(function(th) {
-          pendData.header.push(th.textContent.trim());
-        });
-      }
-      pendTable.querySelectorAll('tbody tr').forEach(function(tr) {
-        var row = [talent];
-        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
-        pendData.rows.push(row);
-      });
-    }
-
-    // ── FINANZAS ─────────────────────────────────────────────────────
-    var finTable = sec.querySelector('.tf table');
-    if (finTable) {
-      if (!finData.header.length) {
-        finData.header = ['Talento'];
-        finTable.querySelectorAll('thead th').forEach(function(th) {
-          finData.header.push(th.textContent.trim());
-        });
-      }
-      finTable.querySelectorAll('tbody tr').forEach(function(tr) {
-        var row = [talent];
-        tr.querySelectorAll('td').forEach(function(td) { row.push(td.innerText.trim()); });
-        finData.rows.push(row);
-      });
-    }
+// ── Informe Mensual ─────────────────────────────────────────────────────
+function applyInformeFilter() {
+  var ztSel   = document.querySelector('#imfbar [data-col="3"]');
+  var monSel  = document.querySelector('#imfbar [data-col="4"]');
+  var pagoSel = document.querySelector('#imfbar [data-col="9"]');
+  var ztVal   = ztSel   ? ztSel.value.toLowerCase()   : '';
+  var monVal  = monSel  ? monSel.value.toLowerCase()  : '';
+  var pagoVal = pagoSel ? pagoSel.value.toLowerCase() : '';
+  document.querySelectorAll('#im-table tbody tr').forEach(function(tr) {
+    var cells = tr.querySelectorAll('td');
+    var zt   = cells[3] ? cells[3].textContent.trim().toLowerCase() : '';
+    var mon  = cells[4] ? cells[4].textContent.trim().toLowerCase() : '';
+    var pago = cells[9] ? cells[9].textContent.trim().toLowerCase() : '';
+    tr.style.display = (
+      (!ztVal  || zt.includes(ztVal)) &&
+      (!monVal || mon === monVal) &&
+      (!pagoVal || pago.includes(pagoVal))
+    ) ? '' : 'none';
   });
-
-  if (!pubData.rows.length && !pendData.rows.length && !finData.rows.length) {
-    alert('No hay datos para exportar.');
-    return;
-  }
-
-  var wb = XLSX.utils.book_new();
-  if (pubData.rows.length) {
-    var ws1 = XLSX.utils.aoa_to_sheet([pubData.header].concat(pubData.rows));
-    XLSX.utils.book_append_sheet(wb, ws1, 'Publicados');
-  }
-  if (pendData.rows.length) {
-    var ws2 = XLSX.utils.aoa_to_sheet([pendData.header].concat(pendData.rows));
-    XLSX.utils.book_append_sheet(wb, ws2, 'Pendientes');
-  }
-  if (finData.rows.length) {
-    var ws3 = XLSX.utils.aoa_to_sheet([finData.header].concat(finData.rows));
-    XLSX.utils.book_append_sheet(wb, ws3, 'Finanzas');
-  }
-
-  var fecha = new Date().toLocaleDateString('es-AR').replace(/\//g, '-');
-  XLSX.writeFile(wb, 'Dashboard ZAS - ' + fecha + '.xlsx');
 }
+function clearInformeFilter() {
+  document.querySelectorAll('#imfbar .fsel').forEach(function(s){ s.value = ''; });
+  document.querySelectorAll('#im-table tbody tr').forEach(function(r){ r.style.display = ''; });
+}
+function exportInformeExcel() {
+  if (typeof XLSX === 'undefined') { alert('No se pudo cargar XLSX.'); return; }
+  var headers = ['N Venta','Marca','Campana','ZAS/Talento','Moneda',
+                 'Neto venta','% Talento','Cobrado','Fecha cobro est.','Pago al talento'];
+  var rows = [headers];
+  document.querySelectorAll('#im-table tbody tr').forEach(function(tr) {
+    if (tr.style.display === 'none') return;
+    var cells = tr.querySelectorAll('td');
+    rows.push(Array.from(cells).map(function(td){ return td.textContent.trim(); }));
+  });
+  var ws = XLSX.utils.aoa_to_sheet(rows);
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Informe Mensual');
+  XLSX.writeFile(wb, 'informe_mensual.xlsx');
+}
+document.addEventListener('DOMContentLoaded', function() {
+  function populateSelect(selId, colIdx) {
+    var sel = document.getElementById(selId);
+    if (!sel) return;
+    var vals = new Set();
+    document.querySelectorAll('#im-table tbody tr td:nth-child(' + (colIdx+1) + ')').forEach(function(td){
+      vals.add(td.textContent.trim());
+    });
+    Array.from(vals).sort().forEach(function(v) {
+      var opt = document.createElement('option');
+      opt.value = v; opt.textContent = v; sel.appendChild(opt);
+    });
+  }
+  populateSelect('im-moneda', 4);
+  populateSelect('im-pago', 9);
+});
 """
 
 
-# ══════════════════════════════════════════════════════════════
-# GENERAR HTML
-# ══════════════════════════════════════════════════════════════
-
-def generar_html(talentos):
+def generar_html(talentos, informe_rows=None):
     now = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     dd_items = "\n".join(
@@ -1535,6 +1597,7 @@ def generar_html(talentos):
         for n in sorted(talentos.keys())
     )
 
+    im_content = render_informe_mensual(informe_rows or [])
     sections = ""
     for name, data in talentos.items():
         ne = name.replace('"', '&quot;').replace("'", "&#39;")
@@ -1547,6 +1610,12 @@ def generar_html(talentos):
   <div class="te">{render_pending(data["pending"], data["finance_by_so"])}</div>
   <div class="tf">{render_finance(data["finance"])}</div>
 </div>"""
+
+    # Wire up the pct operator select — needs to call onPctOpChange
+    # We inject the onchange directly in the HTML template above (render_finance),
+    # but since it's generated once per talent and reused, the fsel-op already has
+    # onchange="applyFinFilter(...)" — we override it here via a global delegated listener
+    # added in the JS block below.
 
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -1566,10 +1635,7 @@ def generar_html(talentos):
     <div class="lm">ZAS</div>
     <div><div class="lt">Seguimiento de Talentos</div><div class="ls">FINANZAS · ODOO</div></div>
   </div>
-  <div class="hdr-right">
-    <button class="exp-btn all-btn" onclick="exportAllExcel()">⬇ Descargar todo (Excel)</button>
-    <span class="lu">Generado: {now}</span>
-  </div>
+  <span class="lu">Generado: {now}</span>
 </div>
 <div class="ts">
   <div class="tl">Talento</div>
@@ -1592,6 +1658,7 @@ def generar_html(talentos):
   <button class="tb active" data-tab="p" onclick="st('p',this)">Publicados <span class="tc" id="cp">—</span></button>
   <button class="tb" data-tab="e" onclick="st('e',this)">Pendientes <span class="tc" id="ce">—</span></button>
   <button class="tb" data-tab="f" onclick="st('f',this)">Finanzas <span class="tc" id="cf">—</span></button>
+  <button class="tb" data-tab="m" onclick="st('m',this)">Informe Mensual</button>
 </div>
 <div class="main">
   <div class="panel active" id="pp">
@@ -1630,6 +1697,14 @@ def generar_html(talentos):
     </div>
     <div id="pf-content"><div class="ns"><div class="ar">↑</div><div>Seleccioná un talento</div></div></div>
   </div>
+  <div class="panel" id="pm">
+    <div class="exp-bar">
+      <div class="exp-wrap">
+        <button class="exp-btn" onclick="exportInformeExcel()">📊 Exportar Excel</button>
+      </div>
+    </div>
+    <div id="pm-content">{im_content}</div>
+  </div>
 </div>
 <div style="display:none" id="data">{sections}</div>
 <script>{JS}
@@ -1644,29 +1719,32 @@ document.addEventListener('change', function(e) {{
 </html>"""
 
 
-# ══════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════
-
 if __name__ == "__main__":
     print("=" * 55)
     print("  Dashboard Talentos ZAS")
     print("=" * 55)
     try:
-        print("\nCargando ROSTER...")
-        roster = cargar_roster()
-
         talent_names, subtareas, task_talent_map, so_map, \
-            client_inv_map, po_map, vendor_inv_map = bajar_datos()
+            client_inv_map, po_map, vendor_inv_map, sol_ext_map = bajar_datos()
 
         print("\nConstruyendo datos...")
         talentos = construir_datos(talent_names, subtareas, task_talent_map,
-                                   so_map, client_inv_map, po_map, vendor_inv_map,
-                                   roster=roster)
+                                   so_map, client_inv_map, po_map, vendor_inv_map)
         print(f"  ✓ {len(talentos)} talentos con datos")
 
+        print("\nCargando roster y pagos para Informe Mensual...")
+        roster    = cargar_roster()
+        pagos_map = cargar_pagos()
+
+        print("\nConstruyendo Informe Mensual...")
+        informe_rows = construir_informe_mensual(
+            so_map, sol_ext_map, client_inv_map,
+            po_map, vendor_inv_map, roster, pagos_map
+        )
+        print(f"  ✓ {len(informe_rows)} ventas en Informe Mensual")
+
         print("\nGenerando HTML...")
-        html = generar_html(talentos)
+        html = generar_html(talentos, informe_rows)
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write(html)
 
@@ -1676,6 +1754,7 @@ if __name__ == "__main__":
         print(f"\n✓ Generado: {OUTPUT_FILE}")
         print(f"  Talentos:   {len(talentos)}")
         print(f"  Publicados: {total_pub}  |  Pendientes: {total_pend}  |  Ventas: {total_fin}")
+        print(f"  Informe mensual: {len(informe_rows)} ventas")
         print("=" * 55)
 
     except Exception as e:
